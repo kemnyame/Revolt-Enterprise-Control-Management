@@ -575,4 +575,54 @@ const publicDir=path.join(process.cwd(),"public");
 app.use(express.static(publicDir));
 app.get("*",(_req,res)=>res.sendFile(path.join(publicDir,"index.html")));
 
-initDb().then(()=>app.listen(port,()=>console.log(`Revolt-X Enterprise Control Management running on port ${port}`))).catch(err=>{console.error("Startup failed",err);process.exit(1);});
+async function runStartupSmokeTest(){
+  const base=`http://127.0.0.1:${port}`;
+  const adminEmail=process.env.ADMIN_EMAIL || "";
+  const adminPassword=process.env.ADMIN_PASSWORD || "";
+  const login=await fetch(base+"/api/auth/login",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({email:adminEmail,password:adminPassword})
+  });
+  if(!login.ok) throw new Error(`Smoke test login failed: ${login.status}`);
+  const loginData:any=await login.json();
+  if(!loginData.token) throw new Error("Smoke test login returned no token");
+  const headers={Authorization:`Bearer ${loginData.token}`};
+  const endpoints=[
+    ["/api/dashboard","dashboard"],
+    ["/api/controls","controls"],
+    ["/api/assessments","assessments"],
+    ["/api/evidence","evidence"],
+    ["/api/findings","findings"],
+    ["/api/integrations","integrations"],
+    ["/api/automation","automation"],
+    ["/api/reports/control-health","controlHealth"],
+    ["/api/reports/framework-coverage","frameworkCoverage"],
+    ["/api/reports/evidence-freshness","evidenceFreshness"],
+    ["/api/reports/assurance-summary","assuranceSummary"],
+    ["/api/audit","audit"],
+    ["/api/users","users"]
+  ] as const;
+  const results:any={};
+  for(const [url,key] of endpoints){
+    const r=await fetch(base+url,{headers});
+    if(!r.ok) throw new Error(`Smoke test ${key} failed: ${r.status}`);
+    const data:any=await r.json();
+    results[key]=Array.isArray(data)?data.length:(data?.controls?.total ?? data?.total ?? "ok");
+  }
+  if(Number(results.controls)<70) throw new Error(`Smoke test control count too low: ${results.controls}`);
+  if(Number(results.integrations)<30) throw new Error(`Smoke test integration count too low: ${results.integrations}`);
+  console.log("Authenticated startup smoke test passed",JSON.stringify(results));
+}
+
+initDb().then(()=>{
+  const server=app.listen(port,async()=>{
+    console.log(`Revolt-X Enterprise Control Management running on port ${port}`);
+    try{
+      await runStartupSmokeTest();
+    }catch(err){
+      console.error("Authenticated startup smoke test failed",err);
+      server.close(()=>process.exit(1));
+    }
+  });
+}).catch(err=>{console.error("Startup failed",err);process.exit(1);});
