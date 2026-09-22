@@ -268,11 +268,13 @@ async function initDb(){
   let org = await pool.query("SELECT id FROM organizations WHERE slug='revolt-demo'");
   let orgId:number;
   if(!org.rowCount){
-    const created=await pool.query("INSERT INTO organizations(name,slug) VALUES($1,$2) RETURNING id",["Revolt-X Enterprise Demo","revolt-demo"]);
+    const created=await pool.query("INSERT INTO organizations(name,slug) VALUES($1,$2) RETURNING id",["Revolt-X Enterprise Control Management","revolt-demo"]);
     orgId=created.rows[0].id;
   } else orgId=org.rows[0].id;
 
   const hash=await bcrypt.hash(adminPassword,12);
+  await pool.query("UPDATE organizations SET name='Revolt-X Enterprise Control Management' WHERE id=$1 AND name ILIKE '%demo%'",[orgId]);
+
   const existing=await pool.query("SELECT id FROM users WHERE lower(email)=lower($1)",[adminEmail]);
   if(!existing.rowCount){
     await pool.query("INSERT INTO users(organization_id,name,email,password_hash,role,status) VALUES($1,$2,$3,$4,'admin','active')",[
