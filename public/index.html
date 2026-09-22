@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Revolt-X Enterprise Control Management</title>
-  <meta name="description" content="Enterprise control management, testing, evidence, findings and audit trail."/>
+  <title>Revolt-X Control Management</title>
+  <meta name="description" content="Enterprise IT control management, evidence, testing, issues and continuous assurance."/>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -14,24 +14,24 @@
   <section class="login-shell" id="loginView">
     <div class="login-brand">
       <div class="brand-mark">RX</div>
-      <div><b>Revolt-X</b><span>Enterprise Control Management</span></div>
+      <div><b>Revolt-X Control</b><span>Enterprise control management</span></div>
     </div>
     <div class="login-grid">
       <div class="login-copy">
-        <span class="eyebrow">CONTROL. EVIDENCE. ASSURANCE.</span>
-        <h1>Know your control posture before the audit does.</h1>
-        <p>Manage IT controls, testing, evidence, exceptions and remediation from one auditable workspace.</p>
+        <span class="eyebrow">REVOLT-X CONTROL MANAGEMENT</span>
+        <h1>Every control. Evidence to back it.</h1>
+        <p>Build a clear, auditable trail from control ownership to evidence, testing, issues and verified resolution.</p>
         <div class="login-points">
-          <div><b>01</b><span>Central control library</span></div>
-          <div><b>02</b><span>Evidence-led testing</span></div>
-          <div><b>03</b><span>Findings to closure</span></div>
-          <div><b>04</b><span>Complete audit trail</span></div>
+          <div><b>01</b><span>Define & assign</span></div>
+          <div><b>02</b><span>Collect & review</span></div>
+          <div><b>03</b><span>Test & resolve</span></div>
+          <div><b>04</b><span>Integrate & automate</span></div>
         </div>
       </div>
       <form class="login-card" id="loginForm">
-        <span class="eyebrow">SECURE SIGN IN</span>
-        <h2>Access your workspace</h2>
-        <p>Use the administrator or assigned user credentials.</p>
+        <span class="eyebrow">PRIVATE ACCESS</span>
+        <h2>Sign in to your workspace</h2>
+        <p>Access is role-based. Your activity is recorded in the audit trail.</p>
         <label>Email address<input id="loginEmail" type="email" required autocomplete="username" placeholder="you@company.com"></label>
         <label>Password<input id="loginPassword" type="password" required autocomplete="current-password" placeholder="••••••••"></label>
         <button class="btn primary full">Sign in →</button>
@@ -42,27 +42,34 @@
 
   <div class="app-shell hidden" id="appView">
     <aside class="sidebar">
-      <div class="sidebar-brand"><div class="brand-mark">RX</div><div><b>Revolt-X</b><span>ECM Platform</span></div></div>
-      <div class="module-card">
-        <small>ACTIVE MODULE</small>
-        <b>IT Controls</b>
-        <span>Enterprise assurance</span>
+      <div class="sidebar-brand"><div class="brand-mark">RX</div><div><b>Revolt-X Control</b><span>IT Controls</span></div></div>
+      <div class="workspace-card">
+        <small>YOUR WORKSPACE</small>
+        <b>Private workspace</b>
+        <span>Evidence with integrity</span>
       </div>
+
+      <div class="nav-group-title">ASSURANCE</div>
       <nav id="nav">
         <button data-page="overview" class="active"><i>◫</i>Overview</button>
-        <button data-page="controls"><i>✓</i>Control Library</button>
-        <button data-page="assessments"><i>◉</i>Assessments</button>
-        <button data-page="evidence"><i>▣</i>Evidence</button>
-        <button data-page="integrations"><i>⌁</i>Integration Hub</button>
-        <button data-page="automation"><i>⚙</i>Evidence Automation</button>
-        <button data-page="findings"><i>!</i>Findings</button>
-        <button data-page="reports"><i>◒</i>Control Health</button>
-        <button data-page="audit"><i>↺</i>Audit Trail</button>
-        <button data-page="users" data-permission="users.read"><i>♙</i>Users & Roles</button>
+        <button data-page="controls"><i>✓</i>Control register</button>
+        <button data-page="evidence"><i>▣</i>Evidence vault</button>
+        <button data-page="assessments"><i>◉</i>Testing & assurance</button>
+        <button data-page="findings"><i>!</i>Issues & remediation</button>
+        <button data-page="integrations"><i>⌁</i>Integrations</button>
       </nav>
-      <div class="future-modules">
-        <small>ENTERPRISE MODULES</small>
-        <span>Cybersecurity Controls</span><span>Operational Risk</span><span>Vendor Risk</span><span>Business Continuity</span><span>Internal Audit</span>
+
+      <div class="nav-group-title workspace-title">WORKSPACE</div>
+      <nav>
+        <button data-page="library"><i>⊞</i>Control library</button>
+        <button data-page="audit"><i>↺</i>Audit trail</button>
+        <button data-page="users" data-permission="users.read"><i>♙</i>Settings & team</button>
+        <button data-page="manual"><i>?</i>User manual</button>
+      </nav>
+
+      <div class="integrity-note">
+        <small>EVIDENCE WITH INTEGRITY</small>
+        <span>Source files · SHA-256 hashes · Recorded actions</span>
       </div>
       <button class="logout" id="logoutBtn">Sign out</button>
     </aside>
@@ -70,73 +77,128 @@
     <main class="main">
       <header class="topbar">
         <button class="mobile-menu" id="menuBtn">☰</button>
-        <div><span class="breadcrumb">Revolt-X / IT Controls</span><h2 id="pageTitle">Control Overview</h2></div>
-        <div class="top-actions"><button class="icon-btn" id="refreshBtn" title="Refresh">↻</button><div class="user-chip"><span id="userInitials">RX</span><div><b id="userName">User</b><small id="userRole">Role</small></div></div></div>
+        <div><span class="breadcrumb">RX IT ASSURANCE / WORKSPACE</span><h2 id="pageTitle">IT controls overview</h2></div>
+        <div class="top-actions">
+          <button class="icon-btn" id="manualBtn" title="User manual">?</button>
+          <button class="icon-btn" id="refreshBtn" title="Refresh">↻</button>
+          <div class="user-chip"><span id="userInitials">RX</span><div><b id="userName">User</b><small id="userRole">Role</small></div></div>
+        </div>
       </header>
 
       <section class="page" id="overviewPage">
-        <div class="hero-panel">
-          <div><span class="eyebrow">IT CONTROL ASSURANCE</span><h1>Control posture at a glance.</h1><p>Monitor design, operating effectiveness, supporting evidence and unresolved exceptions across your IT control environment.</p></div>
-          <button class="btn light" data-open-form="assessment">Record assessment</button>
+        <div class="overview-intro">
+          <div>
+            <span class="eyebrow">IT CONTROLS OVERVIEW</span>
+            <h1>A clear view of your controls, evidence and open actions.</h1>
+            <p>No assumed compliance. Every conclusion should be supported by traceable evidence and a recorded test.</p>
+          </div>
+          <div class="overview-actions">
+            <button class="btn primary" id="overviewTestBtn">Test a control</button>
+            <button class="btn secondary" data-page-link="evidence">Open evidence vault</button>
+          </div>
         </div>
+
         <div class="metric-grid" id="metricGrid"></div>
+
+        <section class="lifecycle-panel">
+          <div class="panel-head"><div><small>THE CONTROL LIFECYCLE</small><h3>From ownership to verified closure</h3></div></div>
+          <div class="lifecycle-grid">
+            <div><b>01</b><h4>Define & assign</h4><p>Clear objectives. Accountable owners. Defined evidence and frequency.</p></div>
+            <div><b>02</b><h4>Collect & review</h4><p>Original evidence. Integrity fingerprints. Traceable sources and review.</p></div>
+            <div><b>03</b><h4>Test & resolve</h4><p>Documented test procedures. Exceptions. Retesting before verified closure.</p></div>
+          </div>
+        </section>
+
         <div class="two-col">
-          <section class="panel"><div class="panel-head"><div><small>CONTROL COVERAGE</small><h3>Controls by category</h3></div></div><div id="categoryChart" class="bar-list"></div></section>
-          <section class="panel"><div class="panel-head"><div><small>RECENT ACTIVITY</small><h3>Audit activity</h3></div><button class="text-btn" data-page-link="audit">View all</button></div><div id="activityList" class="activity-list"></div></section>
+          <section class="panel"><div class="panel-head"><div><small>CONTROL COVERAGE</small><h3>Controls by area</h3></div><button class="text-btn" data-page-link="controls">Open register</button></div><div id="categoryChart" class="bar-list"></div></section>
+          <section class="panel"><div class="panel-head"><div><small>RECENT ACTIVITY</small><h3>Recorded audit actions</h3></div><button class="text-btn" data-page-link="audit">View all</button></div><div id="activityList" class="activity-list"></div></section>
         </div>
-        <section class="panel"><div class="panel-head"><div><small>ATTENTION REQUIRED</small><h3>Open findings</h3></div><button class="text-btn" data-page-link="findings">Manage findings</button></div><div id="overviewFindings"></div></section>
+        <section class="panel"><div class="panel-head"><div><small>OPEN ACTIONS</small><h3>Issues requiring remediation</h3></div><button class="text-btn" data-page-link="findings">Manage issues</button></div><div id="overviewFindings"></div></section>
       </section>
 
       <section class="page hidden" id="controlsPage">
-        <div class="page-toolbar"><div><span class="eyebrow">CONTROL LIBRARY</span><h1>IT Controls</h1><p>Define, assign and monitor the controls that protect critical systems and processes.</p></div><button class="btn primary" data-open-form="control">+ New control</button></div>
-        <div class="filters"><input id="controlSearch" placeholder="Search control code or title"><select id="categoryFilter"><option value="">All categories</option></select><select id="riskFilter"><option value="">All risk levels</option><option>High</option><option>Medium</option><option>Low</option></select></div>
-        <div class="table-card"><table><thead><tr><th>Control</th><th>Category</th><th>Owner</th><th>Frequency</th><th>Risk</th><th>Latest test</th><th>Evidence</th><th>Open findings</th></tr></thead><tbody id="controlsBody"></tbody></table></div>
-      </section>
-
-      <section class="page hidden" id="assessmentsPage">
-        <div class="page-toolbar"><div><span class="eyebrow">TESTING & ASSURANCE</span><h1>Control Assessments</h1><p>Record test outcomes and maintain an evidence-backed assessment history.</p></div><button class="btn primary" data-open-form="assessment">+ Record assessment</button></div>
-        <div class="table-card"><table><thead><tr><th>Control</th><th>Period</th><th>Result</th><th>Score</th><th>Tester</th><th>Review</th><th>Tested</th></tr></thead><tbody id="assessmentsBody"></tbody></table></div>
+        <div class="page-toolbar">
+          <div><span class="eyebrow">CONTROL REGISTER</span><h1>Your IT controls</h1><p>Own, operate, evidence and test every control in the active workspace.</p></div>
+          <div class="toolbar-actions"><button class="btn secondary" data-open-form="control">+ New control</button><button class="btn primary" id="testControlTopBtn">Test control</button></div>
+        </div>
+        <div class="filters"><input id="controlSearch" placeholder="Search control code or title"><select id="categoryFilter"><option value="">All control areas</option></select><select id="riskFilter"><option value="">All risk levels</option><option>High</option><option>Medium</option><option>Low</option></select></div>
+        <div class="table-card"><table><thead><tr><th>Control</th><th>Area</th><th>Owner</th><th>Frequency</th><th>Risk</th><th>Latest test</th><th>Evidence</th><th>Issues</th><th>Action</th></tr></thead><tbody id="controlsBody"></tbody></table></div>
       </section>
 
       <section class="page hidden" id="evidencePage">
-        <div class="page-toolbar"><div><span class="eyebrow">EVIDENCE REGISTER</span><h1>Control Evidence</h1><p>Maintain traceable support for each control and assessment period.</p></div><button class="btn primary" data-open-form="evidence">+ Add evidence</button></div>
+        <div class="page-toolbar">
+          <div><span class="eyebrow">EVIDENCE VAULT</span><h1>Evidence with integrity</h1><p>Upload original source evidence, preserve SHA-256 fingerprints, review it and link it directly to control tests.</p></div>
+          <button class="btn primary" id="uploadEvidenceBtn">+ Upload evidence</button>
+        </div>
+        <div class="evidence-toolbar">
+          <span><b id="evidenceCount">0</b> evidence items</span>
+          <span>Files up to 8 MB per upload</span>
+        </div>
         <div class="evidence-grid" id="evidenceGrid"></div>
       </section>
 
-      <section class="page hidden" id="integrationsPage">
-        <div class="page-toolbar"><div><span class="eyebrow">INTEGRATION HUB</span><h1>Connect Your Control Environment</h1><p>Bring identity, cloud, endpoint, SIEM, ITSM, vulnerability, backup, database and DevSecOps evidence into one control platform.</p></div></div>
-        <div class="integration-summary" id="integrationSummary"></div>
-        <div class="filters"><input id="integrationSearch" placeholder="Search integrations"><select id="integrationCategory"><option value="">All categories</option></select><select id="integrationStatus"><option value="">All statuses</option><option>Available</option><option>Configured</option><option>Connected</option><option>Paused</option></select></div>
-        <div class="integration-grid" id="integrationGrid"></div>
-      </section>
-
-      <section class="page hidden" id="automationPage">
-        <div class="page-toolbar"><div><span class="eyebrow">CONTINUOUS ASSURANCE</span><h1>Evidence Automation</h1><p>Map controls to connected systems so evidence can be collected on schedule and exceptions can be surfaced quickly.</p></div><button class="btn primary" data-open-form="automation">+ New automation</button></div>
-        <div class="automation-banner"><b>Evidence without screenshots.</b><span>Once a source is connected and validated, rules can collect structured evidence from the system of record. This build does not claim a live collection succeeded until provider credentials are configured and a connector test passes.</span></div>
-        <div class="table-card"><table><thead><tr><th>Automation</th><th>Control</th><th>Integration</th><th>Schedule</th><th>Source status</th><th>Last run</th><th>Rule status</th><th>Action</th></tr></thead><tbody id="automationBody"></tbody></table></div>
-      </section>
-
-      <section class="page hidden" id="reportsPage">
-        <div class="page-toolbar"><div><span class="eyebrow">CONTROL INTELLIGENCE</span><h1>Control Health</h1><p>Combine test results, current evidence, findings, framework coverage and due dates into one assurance view.</p></div><button class="btn primary" id="auditPackBtn">Download Audit Pack</button></div>
-        <div class="report-summary" id="reportSummary"></div>
-        <div class="two-col"><section class="panel"><div class="panel-head"><div><small>FRAMEWORK CROSSWALK</small><h3>Coverage by framework</h3></div></div><div id="frameworkCoverage" class="bar-list"></div></section><section class="panel"><div class="panel-head"><div><small>EVIDENCE HYGIENE</small><h3>Evidence freshness</h3></div></div><div id="evidenceFreshness"></div></section></div>
-        <div class="table-card"><table><thead><tr><th>Control</th><th>Domain</th><th>Risk</th><th>Score</th><th>Result</th><th>Current evidence</th><th>Open findings</th><th>Next due</th></tr></thead><tbody id="reportBody"></tbody></table></div>
+      <section class="page hidden" id="assessmentsPage">
+        <div class="page-toolbar">
+          <div><span class="eyebrow">TESTING & ASSURANCE</span><h1>Control testing</h1><p>Document objective, procedure, sample, evidence, exceptions and conclusion for every control test.</p></div>
+          <button class="btn primary" id="testControlAssuranceBtn">+ Test a control</button>
+        </div>
+        <div class="assurance-strip"><span><b>Design</b> Is the control designed to address the risk?</span><span><b>Operation</b> Did it operate as intended?</span><span><b>Evidence</b> Can the conclusion be independently supported?</span></div>
+        <div class="table-card"><table><thead><tr><th>Control</th><th>Period</th><th>Result</th><th>Score</th><th>Sample</th><th>Exceptions</th><th>Tester</th><th>Review</th><th>Tested</th></tr></thead><tbody id="assessmentsBody"></tbody></table></div>
       </section>
 
       <section class="page hidden" id="findingsPage">
-        <div class="page-toolbar"><div><span class="eyebrow">ISSUES & REMEDIATION</span><h1>Findings</h1><p>Track control exceptions from identification through accountable closure.</p></div><button class="btn primary" data-open-form="finding">+ New finding</button></div>
+        <div class="page-toolbar"><div><span class="eyebrow">ISSUES & REMEDIATION</span><h1>Issues to verified closure</h1><p>Track exceptions, owners, deadlines and remediation. A passing retest is required before closure.</p></div><button class="btn primary" data-open-form="finding">+ Raise issue</button></div>
         <div class="finding-board" id="findingBoard"></div>
       </section>
 
+      <section class="page hidden" id="integrationsPage">
+        <div class="page-toolbar"><div><span class="eyebrow">INTEGRATIONS</span><h1>Connect the systems that hold your evidence</h1><p>Validated connectors collect evidence from source systems. A connector is only marked Connected after credentials are successfully verified.</p></div></div>
+        <section class="github-feature" id="githubFeature">
+          <div class="github-icon">GH</div>
+          <div class="github-copy"><span class="eyebrow">LIVE CONNECTOR</span><h2>GitHub</h2><p>Collect repository access, branch protection, pull-request review, security alerts and CI/CD workflow evidence for secure-development controls.</p><div id="githubStatusLine"></div></div>
+          <div class="github-actions" id="githubActions"></div>
+        </section>
+        <div class="integration-summary" id="integrationSummary"></div>
+        <div class="filters"><input id="integrationSearch" placeholder="Search other integrations"><select id="integrationCategory"><option value="">All categories</option></select><select id="integrationStatus"><option value="">All statuses</option><option>Available</option><option>Configured</option><option>Connected</option><option>Paused</option></select></div>
+        <div class="integration-grid" id="integrationGrid"></div>
+
+        <section class="panel automation-section">
+          <div class="panel-head"><div><small>CONTINUOUS ASSURANCE</small><h3>Evidence automation rules</h3></div><button class="btn secondary small" data-open-form="automation">+ New rule</button></div>
+          <div class="table-card flush"><table><thead><tr><th>Automation</th><th>Control</th><th>Integration</th><th>Schedule</th><th>Source status</th><th>Last run</th><th>Action</th></tr></thead><tbody id="automationBody"></tbody></table></div>
+        </section>
+      </section>
+
+      <section class="page hidden" id="libraryPage">
+        <div class="page-toolbar"><div><span class="eyebrow">CONTROL LIBRARY</span><h1>Ready-to-tailor IT controls</h1><p>Use a practical control catalogue covering core IT, cybersecurity, cloud, resilience, DevSecOps, data and emerging technology.</p></div></div>
+        <div class="filters library-filters"><input id="librarySearch" placeholder="Search the library"><select id="libraryCategory"><option value="">All control areas</option></select><select id="libraryRisk"><option value="">All risk levels</option><option>High</option><option>Medium</option><option>Low</option></select></div>
+        <div class="library-grid" id="libraryGrid"></div>
+      </section>
+
       <section class="page hidden" id="auditPage">
-        <div class="page-toolbar"><div><span class="eyebrow">AUDITABILITY</span><h1>Audit Trail</h1><p>Review system activity and changes across your control environment.</p></div></div>
+        <div class="page-toolbar"><div><span class="eyebrow">AUDIT TRAIL</span><h1>Recorded chain of actions</h1><p>Review who changed, tested, reviewed, connected, synced or exported information in the workspace.</p></div><button class="btn secondary" id="auditPackBtn">Download audit pack</button></div>
         <div class="table-card"><table><thead><tr><th>Date & time</th><th>User</th><th>Action</th><th>Entity</th><th>Reference</th><th>Details</th></tr></thead><tbody id="auditBody"></tbody></table></div>
       </section>
 
       <section class="page hidden" id="usersPage">
-        <div class="page-toolbar"><div><span class="eyebrow">ACCESS MANAGEMENT</span><h1>Users & Roles</h1><p>Assign people to the platform using least-privilege roles.</p></div><button class="btn primary" data-open-form="user">+ Add user</button></div>
-        <div class="role-strip"><span><b>Admin</b> Full platform management</span><span><b>Control Manager</b> Manage controls and testing</span><span><b>Auditor</b> Test and review evidence</span><span><b>Reviewer</b> Oversight and remediation</span><span><b>Viewer</b> Read-only access</span></div>
+        <div class="page-toolbar"><div><span class="eyebrow">SETTINGS & TEAM</span><h1>Workspace access</h1><p>Manage users and least-privilege roles for your private control workspace.</p></div><button class="btn primary" data-open-form="user">+ Add user</button></div>
+        <div class="settings-summary"><div><small>WORKSPACE</small><b>Private workspace</b><span>Tenant-scoped data and audit history</span></div><div><small>ACCESS MODEL</small><b>Role-based</b><span>Backend permission enforcement</span></div><div><small>EVIDENCE</small><b>Integrity tracked</b><span>SHA-256 fingerprints on uploaded files</span></div></div>
+        <div class="role-strip"><span><b>Admin</b> Full workspace management</span><span><b>Control Manager</b> Controls, evidence and testing</span><span><b>Auditor</b> Test and review evidence</span><span><b>Reviewer</b> Oversight and remediation</span><span><b>Viewer</b> Read-only access</span></div>
         <div class="table-card"><table><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th></tr></thead><tbody id="usersBody"></tbody></table></div>
+      </section>
+
+      <section class="page hidden" id="manualPage">
+        <div class="page-toolbar"><div><span class="eyebrow">USER MANUAL</span><h1>How to use Revolt-X Control</h1><p>A practical operating guide for control owners, testers, reviewers and administrators.</p></div><input class="manual-search" id="manualSearch" placeholder="Search the manual"></div>
+        <div class="manual-layout">
+          <aside class="manual-nav" id="manualNav"></aside>
+          <div class="manual-content" id="manualContent"></div>
+        </div>
+      </section>
+
+      <section class="page hidden" id="reportsPage">
+        <div class="page-toolbar"><div><span class="eyebrow">CONTROL HEALTH</span><h1>Assurance intelligence</h1><p>Combine test results, evidence freshness, findings, framework coverage and due dates.</p></div><button class="btn primary" id="healthAuditPackBtn">Download audit pack</button></div>
+        <div class="report-summary" id="reportSummary"></div>
+        <div class="two-col"><section class="panel"><div class="panel-head"><div><small>FRAMEWORK CROSSWALK</small><h3>Coverage by framework</h3></div></div><div id="frameworkCoverage" class="bar-list"></div></section><section class="panel"><div class="panel-head"><div><small>EVIDENCE HYGIENE</small><h3>Evidence freshness</h3></div></div><div id="evidenceFreshness"></div></section></div>
+        <div class="table-card"><table><thead><tr><th>Control</th><th>Area</th><th>Risk</th><th>Score</th><th>Result</th><th>Evidence</th><th>Open issues</th><th>Next due</th></tr></thead><tbody id="reportBody"></tbody></table></div>
       </section>
     </main>
   </div>
