@@ -53,9 +53,9 @@ async function githubApi(pathname:string,token:string){
 }
 
 const permissions: Record<string,string[]> = {
-  admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
-  control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","automation.write","reports.read"],
-  auditor:["dashboard.read","controls.read","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
+  admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write","settings.read","settings.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
+  control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","automation.write","reports.read"],
+  auditor:["dashboard.read","controls.read","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   reviewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","integrations.read","automation.read","reports.read"]
 };
@@ -248,6 +248,10 @@ async function initDb(){
     ALTER TABLE evidence ADD COLUMN IF NOT EXISTS review_notes TEXT NOT NULL DEFAULT '';
     ALTER TABLE evidence ADD COLUMN IF NOT EXISTS evidence_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE findings ADD COLUMN IF NOT EXISTS source_assessment_id INTEGER REFERENCES assessments(id) ON DELETE SET NULL;
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS industry TEXT NOT NULL DEFAULT '';
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT '';
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';
+    ALTER TABLE organizations ADD COLUMN IF NOT EXISTS contact_email TEXT NOT NULL DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_controls_org ON controls(organization_id);
     CREATE INDEX IF NOT EXISTS idx_assessments_org ON assessments(organization_id);
     CREATE INDEX IF NOT EXISTS idx_evidence_org ON evidence(organization_id);
@@ -566,7 +570,20 @@ app.get("/api/evidence/files/:id",auth,permit("evidence.read"),async(req:AuthedR
   const q=await pool.query("SELECT * FROM evidence_files WHERE id=$1 AND organization_id=$2",[id,req.user!.orgId]);
   if(!q.rowCount) return res.status(404).json({error:"Evidence file not found"});
   const f=q.rows[0];res.setHeader("Content-Type",f.mime_type);res.setHeader("Content-Length",String(f.size_bytes));
-  res.setHeader("Content-Disposition",'attachment; filename="'+String(f.original_name).replace(/"/g,"")+'"');res.send(f.content);
+  res.setHeader("Content-Disposition",'attachment; filename="'+String(f.original_name).replace(/"/g,"")+'"');res.setHeader("X-Evidence-SHA256",f.sha256);await audit(req.user!,"DOWNLOAD_EVIDENCE","evidence_file",id,{sha256:f.sha256});res.send(f.content);
+});
+
+app.post("/api/evidence/:id/verify",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id);
+  const q=await pool.query(`SELECT e.id,e.sha256,e.file_id,f.content,f.sha256 stored_file_sha FROM evidence e
+    LEFT JOIN evidence_files f ON f.id=e.file_id
+    WHERE e.id=$1 AND e.organization_id=$2`,[id,req.user!.orgId]);
+  if(!q.rowCount)return res.status(404).json({error:"Evidence not found"});
+  if(!q.rows[0].file_id)return res.status(400).json({error:"Integrity verification is available for uploaded source files"});
+  const calculated=crypto.createHash("sha256").update(q.rows[0].content).digest("hex");
+  const valid=calculated===q.rows[0].sha256 && calculated===q.rows[0].stored_file_sha;
+  await audit(req.user!,"VERIFY_EVIDENCE","evidence",id,{valid,sha256:calculated});
+  res.json({valid,sha256:calculated});
 });
 
 app.post("/api/evidence/:id/review",auth,permit("evidence.write"),async(req:AuthedRequest,res)=>{
@@ -577,6 +594,16 @@ app.post("/api/evidence/:id/review",auth,permit("evidence.write"),async(req:Auth
     WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,p.data.review_status,p.data.review_notes,req.user!.id]);
   if(!q.rowCount) return res.status(404).json({error:"Evidence not found"});
   await audit(req.user!,"REVIEW_EVIDENCE","evidence",id,{status:p.data.review_status});res.json(q.rows[0]);
+});
+
+app.post("/api/assessments/:id/review",auth,permit("assessments.review"),async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id);
+  const s=z.object({review_status:z.enum(["Reviewed","Needs Rework","Rejected"]),review_notes:z.string().default("")});
+  const p=s.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid assessment review"});
+  const q=await pool.query(`UPDATE assessments SET review_status=$3,review_notes=$4,reviewed_by=$5,reviewed_at=now()
+    WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,p.data.review_status,p.data.review_notes,req.user!.id]);
+  if(!q.rowCount)return res.status(404).json({error:"Assessment not found"});
+  await audit(req.user!,"REVIEW_TEST","assessment",id,{status:p.data.review_status});res.json(q.rows[0]);
 });
 
 app.get("/api/evidence",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
@@ -841,6 +868,32 @@ app.get("/api/reports/audit-pack.csv",auth,permit("reports.read"),async(req:Auth
   res.setHeader("Content-Type","text/csv; charset=utf-8");
   res.setHeader("Content-Disposition",'attachment; filename="revolt-x-it-controls-audit-pack.csv"');
   res.send(csv);
+});
+
+app.get("/api/settings/organization",auth,permit("settings.read"),async(req:AuthedRequest,res)=>{
+  const q=await pool.query("SELECT id,name,slug,industry,country,timezone,contact_email,created_at FROM organizations WHERE id=$1",[req.user!.orgId]);
+  res.json(q.rows[0]);
+});
+app.put("/api/settings/organization",auth,permit("settings.write"),async(req:AuthedRequest,res)=>{
+  const s=z.object({name:z.string().min(2),industry:z.string().default(""),country:z.string().default(""),timezone:z.string().default("UTC"),contact_email:z.union([z.string().email(),z.literal("")]).default("")});
+  const p=s.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid organisation settings",details:p.error.flatten()});
+  const d=p.data,q=await pool.query("UPDATE organizations SET name=$2,industry=$3,country=$4,timezone=$5,contact_email=$6 WHERE id=$1 RETURNING id,name,slug,industry,country,timezone,contact_email",[req.user!.orgId,d.name,d.industry,d.country,d.timezone,d.contact_email]);
+  await audit(req.user!,"UPDATE","organization",req.user!.orgId,{fields:["name","industry","country","timezone","contact_email"]});res.json(q.rows[0]);
+});
+app.post("/api/auth/change-password",auth,async(req:AuthedRequest,res)=>{
+  const s=z.object({current_password:z.string().min(6),new_password:z.string().min(10)});
+  const p=s.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Use a new password of at least 10 characters"});
+  const q=await pool.query("SELECT password_hash FROM users WHERE id=$1 AND organization_id=$2",[req.user!.id,req.user!.orgId]);
+  if(!q.rowCount||!(await bcrypt.compare(p.data.current_password,q.rows[0].password_hash)))return res.status(400).json({error:"Current password is incorrect"});
+  const hash=await bcrypt.hash(p.data.new_password,12);await pool.query("UPDATE users SET password_hash=$2 WHERE id=$1",[req.user!.id,hash]);
+  await audit(req.user!,"CHANGE_PASSWORD","user",req.user!.id,{});res.json({success:true});
+});
+app.put("/api/users/:id/status",auth,permit("users.write"),async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id);const s=z.object({status:z.enum(["active","disabled"])});const p=s.safeParse(req.body);
+  if(!p.success)return res.status(400).json({error:"Invalid user status"});
+  if(id===req.user!.id&&p.data.status==="disabled")return res.status(400).json({error:"You cannot disable your own account"});
+  const q=await pool.query("UPDATE users SET status=$3 WHERE id=$1 AND organization_id=$2 RETURNING id,name,email,role,status,created_at",[id,req.user!.orgId,p.data.status]);
+  if(!q.rowCount)return res.status(404).json({error:"User not found"});await audit(req.user!,"UPDATE_STATUS","user",id,{status:p.data.status});res.json(q.rows[0]);
 });
 
 app.get("/api/audit",auth,permit("audit.read"),async(req:AuthedRequest,res)=>{
