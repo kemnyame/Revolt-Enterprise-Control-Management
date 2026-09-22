@@ -88,7 +88,7 @@ async function githubApi(pathname:string,token:string){
 const permissions: Record<string,string[]> = {
   admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write","settings.read","settings.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
   control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","integrations.read","automation.read","automation.write","reports.read"],
-  control_officer:["dashboard.read","controls.read","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","integrations.read","automation.read","reports.read"],
+  control_officer:["dashboard.read","controls.read","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","integrations.read","automation.read"],
   auditor:["dashboard.read","controls.read","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   reviewer:["dashboard.read","controls.read","assessments.read","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","integrations.read","automation.read","reports.read"]
@@ -657,7 +657,7 @@ app.post("/api/evidence/upload",auth,permit("evidence.write"),upload.single("fil
 
 app.get("/api/evidence/files/:id",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
-  const q=await pool.query("SELECT * FROM evidence_files WHERE id=$1 AND organization_id=$2",[id,req.user!.orgId]);
+  const q=await pool.query(`SELECT f.* FROM evidence_files f JOIN evidence e ON e.file_id=f.id JOIN controls c ON c.id=e.control_id WHERE f.id=$1 AND f.organization_id=$2 AND ($3::boolean=false OR c.assigned_user_id=$4)`,[id,req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
   if(!q.rowCount) return res.status(404).json({error:"Evidence file not found"});
   const f=q.rows[0];res.setHeader("Content-Type",f.mime_type);res.setHeader("Content-Length",String(f.size_bytes));
   res.setHeader("Content-Disposition",'attachment; filename="'+String(f.original_name).replace(/"/g,"")+'"');res.setHeader("X-Evidence-SHA256",f.sha256);await audit(req.user!,"DOWNLOAD_EVIDENCE","evidence_file",id,{sha256:f.sha256});res.send(f.content);
@@ -666,8 +666,8 @@ app.get("/api/evidence/files/:id",auth,permit("evidence.read"),async(req:AuthedR
 app.post("/api/evidence/:id/verify",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
   const q=await pool.query(`SELECT e.id,e.sha256,e.file_id,f.content,f.sha256 stored_file_sha FROM evidence e
-    LEFT JOIN evidence_files f ON f.id=e.file_id
-    WHERE e.id=$1 AND e.organization_id=$2`,[id,req.user!.orgId]);
+    LEFT JOIN evidence_files f ON f.id=e.file_id JOIN controls c ON c.id=e.control_id
+    WHERE e.id=$1 AND e.organization_id=$2 AND ($3::boolean=false OR c.assigned_user_id=$4)`,[id,req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
   if(!q.rowCount)return res.status(404).json({error:"Evidence not found"});
   if(!q.rows[0].file_id)return res.status(400).json({error:"Integrity verification is available for uploaded source files"});
   const calculated=crypto.createHash("sha256").update(q.rows[0].content).digest("hex");
@@ -680,8 +680,9 @@ app.post("/api/evidence/:id/review",auth,permit("evidence.write"),async(req:Auth
   const id=Number(req.params.id);
   const s=z.object({review_status:z.enum(["Approved","Rejected","Needs Update"]),review_notes:z.string().default("")});
   const p=s.safeParse(req.body);if(!p.success) return res.status(400).json({error:"Invalid review"});
-  const q=await pool.query(`UPDATE evidence SET review_status=$3,review_notes=$4,reviewed_by=$5,reviewed_at=now()
-    WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,p.data.review_status,p.data.review_notes,req.user!.id]);
+  const q=await pool.query(`UPDATE evidence e SET review_status=$3,review_notes=$4,reviewed_by=$5,reviewed_at=now()
+    FROM controls c WHERE e.control_id=c.id AND e.id=$1 AND e.organization_id=$2 AND ($6::boolean=false OR c.assigned_user_id=$7) RETURNING e.*`,
+    [id,req.user!.orgId,p.data.review_status,p.data.review_notes,req.user!.id,req.user!.role==="control_officer",req.user!.id]);
   if(!q.rowCount) return res.status(404).json({error:"Evidence not found"});
   await audit(req.user!,"REVIEW_EVIDENCE","evidence",id,{status:p.data.review_status});res.json(q.rows[0]);
 });
