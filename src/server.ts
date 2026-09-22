@@ -1239,7 +1239,7 @@ async function runStartupSmokeTest(){
   if(!connectorCheck.ok) throw new Error(`Smoke test connector catalogue failed: ${connectorCheck.status}`);
   const connectorRows:any[]=await connectorCheck.json();
   const liveAdapters=connectorRows.filter((x:any)=>x.connector_live).length;
-  if(liveAdapters<8) throw new Error(`Smoke test live connector count too low: ${liveAdapters}`);
+  if(liveAdapters<9) throw new Error(`Smoke test live connector count too low: ${liveAdapters}`);
   results.liveConnectorAdapters=liveAdapters;
 
   const settings=await fetch(base+"/api/settings/organization",{headers});
@@ -1301,6 +1301,15 @@ async function runStartupSmokeTest(){
     if(!findingUpdate.ok) throw new Error(`Smoke test finding update failed: ${findingUpdate.status} ${await findingUpdate.text()}`);
     results.findingSave="ok";
     results.findingUpdate="ok";
+
+    const auditBefore=await pool.query("SELECT COALESCE(max(id),0)::bigint max_id FROM audit_logs WHERE organization_id=$1",[loginData.user.orgId]);
+    const pack=await fetch(base+"/api/reports/audit-pack.zip",{headers});
+    if(!pack.ok) throw new Error(`Smoke test audit pack failed: ${pack.status} ${await pack.text()}`);
+    const packType=pack.headers.get("content-type")||"";
+    const packBytes=Buffer.from(await pack.arrayBuffer());
+    if(!packType.includes("application/zip")||packBytes.length<1000) throw new Error("Smoke test audit pack returned an invalid archive");
+    results.auditPackZip="ok";
+    await pool.query("DELETE FROM audit_logs WHERE organization_id=$1 AND id>$2 AND action='EXPORT' AND details->>'format'='zip'",[loginData.user.orgId,auditBefore.rows[0].max_id]).catch(()=>{});
 
     try{
       const gh=await fetch("https://api.github.com/repos/kemnyame/Revolt-Enterprise-Control-Management",{headers:{"Accept":"application/vnd.github+json","User-Agent":"Revolt-X-Control-Smoke-Test"}});
