@@ -250,7 +250,20 @@ function renderLibrary(){
   $$("[data-add-library]").forEach(b=>b.onclick=async()=>{try{await api("/api/control-library/"+encodeURIComponent(b.dataset.addLibrary)+"/add",{method:"POST",body:"{}"});toast("Control added to register");await refresh(["controls","library","dashboard","audit"])}catch(e){toast(e.message)}});
 }
 function renderAudit(){
-  $("#auditBody").innerHTML=state.audit.length?state.audit.map(a=>'<tr><td>'+fmtTime(a.created_at)+'</td><td class="control-name"><b>'+esc(a.user_name||"System")+'</b><span>'+esc(a.email||"")+'</span></td><td><b>'+esc(a.action)+'</b></td><td>'+esc(a.entity_type)+'</td><td>'+esc(a.entity_id??"—")+'</td><td>'+esc(JSON.stringify(a.details||{}).slice(0,120))+'</td></tr>').join(""):'<tr><td colspan="6" class="empty-state">No audit activity available.</td></tr>';
+  if(!$("#auditBody"))return;
+  const search=$("#auditSearch")?.value?.toLowerCase()||"",action=$("#auditAction")?.value||"",entity=$("#auditEntity")?.value||"";
+  const rows=(state.audit||[]).filter(a=>(!search||(String(a.user_name||"")+" "+String(a.email||"")+" "+String(a.action||"")+" "+String(a.entity_type||"")+" "+JSON.stringify(a.details||{})).toLowerCase().includes(search))&&(!action||a.action===action)&&(!entity||a.entity_type===entity));
+  $("#auditBody").innerHTML=rows.length?rows.map(a=>'<tr><td>'+fmtTime(a.created_at)+'</td><td class="control-name"><b>'+esc(a.user_name||"System")+'</b><span>'+esc(a.email||"")+'</span></td><td><b>'+esc(a.action)+'</b></td><td>'+esc(a.entity_type)+'</td><td>'+esc(a.entity_id??"—")+'</td><td>'+esc(JSON.stringify(a.details||{}).slice(0,180))+'</td></tr>').join(""):'<tr><td colspan="6" class="empty-state">No audit activity matches the current filters.</td></tr>';
+  if($("#auditAction")){
+    const old=$("#auditAction").value,vals=[...new Set((state.audit||[]).map(x=>x.action))].sort();
+    $("#auditAction").innerHTML='<option value="">All actions</option>'+vals.map(x=>'<option>'+esc(x)+'</option>').join("");
+    $("#auditAction").value=old;
+  }
+  if($("#auditEntity")){
+    const old=$("#auditEntity").value,vals=[...new Set((state.audit||[]).map(x=>x.entity_type))].sort();
+    $("#auditEntity").innerHTML='<option value="">All entities</option>'+vals.map(x=>'<option>'+esc(x)+'</option>').join("");
+    $("#auditEntity").value=old;
+  }
 }
 function renderUsers(){
   $("#usersBody").innerHTML=state.users.length?state.users.map(u=>'<tr><td class="control-name"><b>'+esc(u.name)+'</b></td><td>'+esc(u.email)+'</td><td>'+tag(humanRole(u.role))+'</td><td>'+tag(u.status)+'</td><td>'+fmtDate(u.created_at)+'</td><td>'+(has("users.write")&&u.id!==state.user?.id?'<button class="action-btn" data-user-status="'+u.id+'" data-next-status="'+(u.status==="active"?"disabled":"active")+'">'+(u.status==="active"?"Disable":"Enable")+'</button>':'')+'</td></tr>').join(""):'<tr><td colspan="6" class="empty-state">No users available.</td></tr>';
@@ -392,15 +405,23 @@ function bindPageLinks(){$$("[data-page-link]").forEach(b=>b.onclick=()=>go(b.da
 function bindOpenForms(){
   $$("[data-open-form]").forEach(b=>b.onclick=()=>{const t=b.dataset.openForm;if(t==="control")createControlForm();if(t==="evidence")openLinkEvidence();if(t==="finding")createFindingForm();if(t==="user")createUserForm()});
 }
-async function downloadAuditPack(){
-  try{const r=await fetch("/api/reports/audit-pack.csv",{headers:{Authorization:"Bearer "+state.token}});if(!r.ok)throw new Error("Unable to export audit pack");const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="revolt-x-it-controls-audit-pack.csv";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);toast("Audit pack downloaded")}catch(e){toast(e.message)}
+async function downloadFileFromApi(url,filename){
+  try{
+    const r=await fetch(url,{headers:{Authorization:"Bearer "+state.token}});
+    if(!r.ok){let m="Download failed";try{const d=await r.json();m=d.error||m}catch{}throw new Error(m)}
+    const blob=await r.blob(),obj=URL.createObjectURL(blob),a=document.createElement("a");
+    a.href=obj;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(obj);
+  }catch(e){toast(e.message)}
 }
+async function downloadAuditPack(){await downloadFileFromApi("/api/reports/audit-pack.zip","revolt-x-it-controls-audit-pack.zip");toast("Full audit pack generated")}
+async function downloadAuditCsv(){await downloadFileFromApi("/api/reports/audit-pack.csv","revolt-x-it-controls-controls.csv")}
+
 
 $("#loginForm").addEventListener("submit",login);$("#logoutBtn").onclick=logout;$("#refreshBtn").onclick=loadAll;$("#menuBtn").onclick=()=>$(".sidebar").classList.toggle("open");
 $$("[data-page]").forEach(b=>b.onclick=()=>go(b.dataset.page));
 bindPageLinks();bindOpenForms();bindModalClose();
 $("#modal").addEventListener("click",e=>{if(e.target.matches("[data-close-modal]"))closeModal()});
-$("#uploadEvidenceBtn").onclick=openUploadEvidence;$("#startTestBtn").onclick=startGenericTest;$("#startTestBtn2").onclick=startGenericTest;$("#testControlTopBtn")?.addEventListener("click",startGenericTest);$("#manualBtn")?.addEventListener("click",()=>go("manual"));$("#auditPackBtn").onclick=downloadAuditPack;$("#healthAuditPackBtn")?.addEventListener("click",downloadAuditPack);
+$("#uploadEvidenceBtn").onclick=openUploadEvidence;$("#startTestBtn").onclick=startGenericTest;$("#startTestBtn2").onclick=startGenericTest;$("#testControlTopBtn")?.addEventListener("click",startGenericTest);$("#manualBtn")?.addEventListener("click",()=>go("manual"));$("#auditPackBtn").onclick=downloadAuditPack;$("#auditCsvBtn")?.addEventListener("click",downloadAuditCsv);$("#healthAuditPackBtn")?.addEventListener("click",downloadAuditPack);
 $("#orgSettingsForm")?.addEventListener("submit",async e=>{
   e.preventDefault();
   const d=Object.fromEntries(new FormData(e.target).entries());
@@ -418,3 +439,4 @@ $("[data-manual]").forEach(b=>b.onclick=()=>renderManual(b.dataset.manual));
 ["integrationSearch","integrationCategory","integrationStatus"].forEach(id=>$("#"+id)?.addEventListener(id==="integrationSearch"?"input":"change",renderIntegrations));
 ["librarySearch","libraryCategory","libraryRisk"].forEach(id=>$("#"+id)?.addEventListener(id==="librarySearch"?"input":"change",renderLibrary));
 restore();
+\n["auditSearch","auditAction","auditEntity"].forEach(id=>$("#"+id)?.addEventListener(id==="auditSearch"?"input":"change",renderAudit));\n
