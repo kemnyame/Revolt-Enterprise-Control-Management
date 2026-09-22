@@ -1,6 +1,6 @@
 type Dict=Record<string,any>;
 export type CollectedEvidence={controlCode:string;title:string;payload:Dict;finding?:{title:string;description:string;severity:"Low"|"Medium"|"High";owner:string}};
-export const liveConnectorKeys=["microsoft-entra","microsoft-365","jira","servicenow","splunk","tenable","crowdstrike"] as const;
+export const liveConnectorKeys=["revolt-os","microsoft-entra","microsoft-365","jira","servicenow","splunk","tenable","crowdstrike"] as const;
 
 function requireString(obj:Dict,key:string){
   const v=String(obj?.[key]||"").trim();if(!v)throw new Error(key.replace(/_/g," ")+" is required");return v;
@@ -27,6 +27,38 @@ async function graphGet(path:string,token:string){
   return (await jsonRequest("https://graph.microsoft.com"+path,{headers:{Authorization:"Bearer "+token,Accept:"application/json"}})).body;
 }
 async function graphTry(path:string,token:string){try{return await graphGet(path,token)}catch(e:any){return {unavailable:true,error:e.message,status:e.status||null}}}
+
+
+async function revoltOsLogin(credentials:Dict,config:Dict){
+  const base=safePublicHttps(requireString(config,"base_url"));
+  const body:any={email:requireString(credentials,"email"),password:requireString(credentials,"password")};
+  if(credentials.organisation_id)body.organisationId=String(credentials.organisation_id);
+  const login=await jsonRequest(base+"/v1/auth/login",{method:"POST",headers:{"Content-Type":"application/json",Accept:"application/json"},body:JSON.stringify(body)});
+  return {base,accessToken:login.body.accessToken,organisationId:login.body.organisationId};
+}
+async function validateRevoltOS(credentials:Dict,config:Dict){
+  const {base,accessToken,organisationId}=await revoltOsLogin(credentials,config);
+  const context=(await jsonRequest(base+"/v1/auth/context",{headers:{Authorization:"Bearer "+accessToken,Accept:"application/json"}})).body;
+  return {identity:context.organisation_name||"Revolt-X OS",metadata:{baseUrl:base,organisationId:organisationId||context.organisation_id,user:context.email,permissions:context.permissions||[]}};
+}
+async function collectRevoltOS(credentials:Dict,config:Dict):Promise<CollectedEvidence[]>{
+  const {base,accessToken}=await revoltOsLogin(credentials,config);
+  const headers={Authorization:"Bearer "+accessToken,Accept:"application/json"};
+  const get=(path:string)=>jsonRequest(base+path,{headers}).then(r=>r.body).catch((e:any)=>({unavailable:true,error:e.message,status:e.status||null}));
+  const [organisation,users,roles,branches,departments,teams,auditLogs]=await Promise.all([
+    get("/v1/organisation"),get("/v1/users"),get("/v1/roles"),get("/v1/branches"),get("/v1/departments"),get("/v1/teams"),get("/v1/audit-logs?limit=100")
+  ]);
+  const userList=Array.isArray(users)?users:[];
+  const inactive=userList.filter((u:any)=>u.membership_status!=="active"||u.status!=="active");
+  const evidence:CollectedEvidence[]=[
+    {controlCode:"GOV-004",title:"Revolt-X OS organisation and responsibility structure",payload:{collectedAt:new Date().toISOString(),organisation,roles,branches,departments,teams}},
+    {controlCode:"IAM-001",title:"Revolt-X OS user and membership inventory",payload:{collectedAt:new Date().toISOString(),users}},
+    {controlCode:"IAM-004",title:"Revolt-X OS role and access structure",payload:{collectedAt:new Date().toISOString(),roles,users}},
+    {controlCode:"LOG-001",title:"Revolt-X OS audit-log snapshot",payload:{collectedAt:new Date().toISOString(),auditLogs}}
+  ];
+  if(inactive.length)evidence[1].finding={title:inactive.length+" Revolt-X OS user membership(s) need lifecycle review",description:"The Core OS user inventory contains inactive, suspended or invited membership records. Review whether access should remain provisioned.",severity:"Medium",owner:"IAM Manager"};
+  return evidence;
+}
 
 async function validateMicrosoft(credentials:Dict){
   const {token,tenant}=await graphToken(credentials);
@@ -177,6 +209,7 @@ async function collectCrowdStrike(credentials:Dict,config:Dict):Promise<Collecte
 
 export function connectorFields(provider:string){
   const fields:Record<string,any>={
+    "revolt-os":{credentials:[["email","OS service account email","email"],["password","OS service account password","password"],["organisation_id","Organisation ID (optional)","text"]],config:[["base_url","Revolt-X OS URL","url","https://revolt-x-os.onrender.com"]]},
     "microsoft-entra":{credentials:[["tenant_id","Tenant ID","text"],["client_id","Client ID","text"],["client_secret","Client secret","password"]],config:[]},
     "microsoft-365":{credentials:[["tenant_id","Tenant ID","text"],["client_id","Client ID","text"],["client_secret","Client secret","password"]],config:[]},
     jira:{credentials:[["email","Atlassian email","email"],["api_token","API token","password"]],config:[["base_url","Jira site URL","url","https://company.atlassian.net"]]},
@@ -190,6 +223,7 @@ export function connectorFields(provider:string){
 
 export async function validateConnector(provider:string,credentials:Dict,config:Dict){
   switch(provider){
+    case "revolt-os":return validateRevoltOS(credentials,config);
     case "microsoft-entra":case "microsoft-365":return validateMicrosoft(credentials);
     case "jira":return validateJira(credentials,config);
     case "servicenow":return validateServiceNow(credentials,config);
@@ -201,6 +235,7 @@ export async function validateConnector(provider:string,credentials:Dict,config:
 }
 export async function collectConnector(provider:string,credentials:Dict,config:Dict):Promise<CollectedEvidence[]>{
   switch(provider){
+    case "revolt-os":return collectRevoltOS(credentials,config);
     case "microsoft-entra":return collectEntra(credentials);
     case "microsoft-365":return collectM365(credentials);
     case "jira":return collectJira(credentials,config);
