@@ -113,9 +113,9 @@ function renderIntegrations(){
   const gh=state.integrations.find(i=>i.provider_key==="github");
   if(gh){
     $("#githubConnectionState").innerHTML='<div class="connection-state">Status: <strong>'+esc(gh.status)+'</strong>'+(gh.tenant_ref?' · Account: <strong>'+esc(gh.tenant_ref)+'</strong>':'')+(gh.last_sync_at?' · Last sync: '+fmtTime(gh.last_sync_at):'')+'</div>';
-    $("#githubActions").innerHTML=gh.status==="Connected"
+    $("#githubActions").innerHTML=!has("integrations.write")?"":(gh.status==="Connected"
       ?'<button class="btn outline" id="manageGithubBtn">Repositories</button><button class="btn outline" id="syncGithubBtn">Sync now</button><button class="btn outline" id="disconnectGithubBtn">Disconnect</button>'
-      :'<button class="btn outline" id="connectGithubBtn">Connect GitHub</button>';
+      :'<button class="btn outline" id="connectGithubBtn">Connect GitHub</button>');
     $("#connectGithubBtn")?.addEventListener("click",connectGithub);
     $("#manageGithubBtn")?.addEventListener("click",manageGithubRepos);
     $("#syncGithubBtn")?.addEventListener("click",syncGithub);
@@ -180,7 +180,7 @@ async function openControl(id){
     '<section class="detail-section panel"><div class="panel-head"><div><span class="caps">EVIDENCE</span><h3>Evidence attached to this control</h3></div></div>'+(d.evidence.length?d.evidence.map(e=>'<div class="activity-item"><span>▣</span><div><b>'+esc(e.title)+'</b><small>'+esc(e.source)+' · '+tag(e.review_status)+'</small></div><time>'+fmtDate(e.created_at)+'</time></div>').join(""):'<div class="empty-state">No evidence yet.</div>')+'</section>'+
     '<section class="detail-section panel"><div class="panel-head"><div><span class="caps">TEST HISTORY</span><h3>Recorded control tests</h3></div></div>'+(d.tests.length?d.tests.map(t=>'<div class="activity-item"><span>✓</span><div><b>'+esc(t.period)+' · '+esc(t.result)+'</b><small>'+esc(t.tester_name||"—")+' · Score '+esc(t.score??"—")+'%</small></div><time>'+fmtDate(t.tested_at)+'</time></div>').join(""):'<div class="empty-state">This control has not been tested.</div>')+'</section>'+
     '<section class="detail-section panel"><div class="panel-head"><div><span class="caps">ISSUES</span><h3>Findings and remediation</h3></div></div>'+(d.findings.length?d.findings.map(x=>'<div class="activity-item"><span>!</span><div><b>'+esc(x.title)+'</b><small>'+esc(x.owner||"Unassigned")+' · '+esc(x.status)+'</small></div><time>'+fmtDate(x.due_date)+'</time></div>').join(""):'<div class="empty-state">No findings linked to this control.</div>')+'</section>';
-    go("controlDetail");$("[data-back-register]").onclick=()=>go("controls");$("[data-detail-test]").onclick=()=>openTestControl(id);if($("[data-edit-control]"))$("[data-edit-control]").onclick=()=>editControl(c);
+    go("controlDetail");$("[data-back-register]").onclick=()=>go("controls");if($("[data-detail-test]"))$("[data-detail-test]").onclick=()=>openTestControl(id);if($("[data-edit-control]"))$("[data-edit-control]").onclick=()=>editControl(c);
   }catch(e){toast(e.message)}
 }
 async function openTestControl(id){
