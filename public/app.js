@@ -1,4 +1,4 @@
-const state={token:localStorage.getItem("revolt_token")||"",user:null,permissions:[],controls:[],assessments:[],evidence:[],findings:[],integrations:[],automation:[],report:[],audit:[],users:[],dashboard:null,page:"overview"};
+const state={token:localStorage.getItem("revolt_token")||"",user:null,permissions:[],controls:[],assessments:[],evidence:[],findings:[],integrations:[],automation:[],report:[],frameworkCoverage:[],evidenceFreshness:null,assuranceSummary:null,audit:[],users:[],dashboard:null,page:"overview"};
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 const fmtDate=v=>v?new Date(v).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}):"—";
@@ -34,9 +34,9 @@ async function restore(){
 async function loadAll(){
   document.body.classList.add("loading");
   try{
-    const jobs=[api("/api/dashboard"),api("/api/controls"),api("/api/assessments"),api("/api/evidence"),api("/api/findings"),api("/api/integrations"),api("/api/automation"),api("/api/reports/control-health"),has("audit.read")?api("/api/audit"):Promise.resolve([]),has("users.read")?api("/api/users"):Promise.resolve([])];
-    const [dashboard,controls,assessments,evidence,findings,integrations,automation,report,audit,users]=await Promise.all(jobs);
-    Object.assign(state,{dashboard,controls,assessments,evidence,findings,integrations,automation,report,audit,users});renderAll();
+    const jobs=[api("/api/dashboard"),api("/api/controls"),api("/api/assessments"),api("/api/evidence"),api("/api/findings"),api("/api/integrations"),api("/api/automation"),api("/api/reports/control-health"),api("/api/reports/framework-coverage"),api("/api/reports/evidence-freshness"),api("/api/reports/assurance-summary"),has("audit.read")?api("/api/audit"):Promise.resolve([]),has("users.read")?api("/api/users"):Promise.resolve([])];
+    const [dashboard,controls,assessments,evidence,findings,integrations,automation,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users]=await Promise.all(jobs);
+    Object.assign(state,{dashboard,controls,assessments,evidence,findings,integrations,automation,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users});renderAll();
   }catch(err){toast(err.message)}finally{document.body.classList.remove("loading")}
 }
 function renderAll(){renderDashboard();renderControls();renderAssessments();renderEvidence();renderIntegrations();renderAutomation();renderFindings();renderReports();renderAudit();renderUsers();populateFilters()}
@@ -107,8 +107,16 @@ async function runAutomation(id){
 }
 function renderReports(){
   const rows=state.report||[], tested=rows.filter(r=>r.latest_result!=="Not Tested"), avg=tested.length?Math.round(tested.reduce((s,r)=>s+Number(r.score||0),0)/tested.length):0;
-  const high=rows.filter(r=>r.risk_level==="High").length, notTested=rows.filter(r=>r.latest_result==="Not Tested").length, open=rows.reduce((s,r)=>s+Number(r.open_findings||0),0);
-  $("#reportSummary").innerHTML=[["Average tested score",avg+"%","Across tested controls"],["High-risk controls",high,"Require stronger assurance"],["Not yet tested",notTested,"Controls awaiting assessment"],["Open findings",open,"Exceptions requiring action"]].map(x=>'<div class="metric"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
+  const summary=state.assuranceSummary||{}, freshness=state.evidenceFreshness||{};
+  $("#reportSummary").innerHTML=[
+    ["Average tested score",avg+"%","Across tested controls"],
+    ["Testing coverage",(summary.testing_coverage||0)+"%",(summary.tested_controls||0)+" of "+(summary.controls||rows.length)+" controls"],
+    ["Automation coverage",(summary.automation_coverage||0)+"%",(summary.automated_controls||0)+" controls mapped to evidence rules"],
+    ["High findings",summary.high_findings||0,"High-severity exceptions still open"]
+  ].map(x=>'<div class="metric"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
+  const fw=state.frameworkCoverage||[],max=Math.max(1,...fw.map(x=>Number(x.controls||0)));
+  $("#frameworkCoverage").innerHTML=fw.length?fw.map(x=>'<div class="bar-row"><span>'+esc(x.framework)+'</span><div class="bar-track"><i style="width:'+(Number(x.controls)/max*100)+'%"></i></div><b>'+esc(x.controls)+'</b></div>').join(""):'<div class="empty-state">No framework mappings available.</div>';
+  $("#evidenceFreshness").innerHTML='<div class="mini-stats"><div><small>Fresh</small><strong>'+esc(freshness.fresh||0)+'</strong></div><div><small>Expiring soon</small><strong>'+esc(freshness.expiring_soon||0)+'</strong></div><div><small>Expired</small><strong>'+esc(freshness.expired||0)+'</strong></div></div><p style="font-size:10px;color:var(--muted)">Automated evidence items: <b>'+esc(freshness.automated||0)+'</b> of '+esc(freshness.total||0)+'. Evidence approaching expiry is surfaced before an audit request becomes urgent.</p>';
   $("#reportBody").innerHTML=rows.length?rows.map(r=>{const score=Number(r.score||0);const cls=score>=85?"good":score>=70?"warn":score>0?"bad":"";return '<tr><td class="control-name"><b>'+esc(r.control_code)+' · '+esc(r.title)+'</b><span>'+esc(r.owner||"Unassigned")+'</span></td><td>'+esc(r.category)+'</td><td>'+tag(r.risk_level)+'</td><td><span class="score-ring '+cls+'">'+(score?score:"—")+'</span></td><td>'+tag(r.latest_result)+'</td><td>'+esc(r.current_evidence)+'</td><td>'+esc(r.open_findings)+'</td><td>'+fmtDate(r.next_due)+'</td></tr>'}).join(""):'<tr><td colspan="8" class="empty-state">No control health data available.</td></tr>';
 }
 function openIntegration(id){
@@ -134,7 +142,7 @@ function populateFilters(){
   const cats=[...new Set(state.controls.map(c=>c.category))].sort(); if($("#categoryFilter")){$("#categoryFilter").innerHTML='<option value="">All categories</option>'+cats.map(c=>'<option>'+esc(c)+'</option>').join("")}
 }
 async function refresh(parts){
-  const map={dashboard:["dashboard","/api/dashboard"],controls:["controls","/api/controls"],assessments:["assessments","/api/assessments"],evidence:["evidence","/api/evidence"],findings:["findings","/api/findings"],integrations:["integrations","/api/integrations"],automation:["automation","/api/automation"],report:["report","/api/reports/control-health"],audit:["audit","/api/audit"],users:["users","/api/users"]};
+  const map={dashboard:["dashboard","/api/dashboard"],controls:["controls","/api/controls"],assessments:["assessments","/api/assessments"],evidence:["evidence","/api/evidence"],findings:["findings","/api/findings"],integrations:["integrations","/api/integrations"],automation:["automation","/api/automation"],report:["report","/api/reports/control-health"],frameworkCoverage:["frameworkCoverage","/api/reports/framework-coverage"],evidenceFreshness:["evidenceFreshness","/api/reports/evidence-freshness"],assuranceSummary:["assuranceSummary","/api/reports/assurance-summary"],audit:["audit","/api/audit"],users:["users","/api/users"]};
   for(const p of parts){if(map[p])state[map[p][0]]=await api(map[p][1])}renderAll();
 }
 function modal(html){$("#modalBody").innerHTML=html;$("#modal").classList.remove("hidden")}
@@ -168,3 +176,13 @@ $("#modal").addEventListener("click",e=>{if(e.target.matches("[data-close-modal]
 ["controlSearch","categoryFilter","riskFilter"].forEach(id=>$("#"+id)?.addEventListener(id==="controlSearch"?"input":"change",renderControls));
 ["integrationSearch","integrationCategory","integrationStatus"].forEach(id=>$("#"+id)?.addEventListener(id==="integrationSearch"?"input":"change",renderIntegrations));
 restore();
+
+async function downloadAuditPack(){
+  try{
+    const r=await fetch("/api/reports/audit-pack.csv",{headers:{Authorization:"Bearer "+state.token}});
+    if(!r.ok){let d={};try{d=await r.json()}catch{};throw new Error(d.error||"Unable to export audit pack")}
+    const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");
+    a.href=url;a.download="revolt-x-it-controls-audit-pack.csv";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);toast("Audit pack exported");
+  }catch(e){toast(e.message)}
+}
+$("#auditPackBtn")?.addEventListener("click",downloadAuditPack);
