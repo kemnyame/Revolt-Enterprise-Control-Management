@@ -40,3 +40,5 @@
 @media(max-width:1100px){.progress-summary{grid-template-columns:repeat(3,1fr)}.role-strip{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:820px){.progress-head{align-items:flex-start;flex-direction:column}.progress-filters{justify-content:flex-start}.progress-summary{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:550px){.progress-summary,.role-strip{grid-template-columns:1fr}.progress-row{grid-template-columns:1fr 80px 35px}}
+
+.click-row{cursor:pointer}.click-row:hover td{background:#fafaf7}
