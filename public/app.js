@@ -110,7 +110,7 @@ function renderProgress(){
   $("#progressFrequencyGrid").innerHTML=(p.by_frequency||[]).length?p.by_frequency.map(x=>{const pct=x.total?Math.round(x.completed/x.total*100):0;return '<div class="progress-row"><span>'+esc(x.frequency)+' · '+x.completed+'/'+x.total+' done</span><div class="track"><i style="width:'+pct+'%"></i></div><b>'+pct+'%</b></div>'}).join(""):'<div class="empty-state">No frequency data.</div>';
   $("#progressOfficerGrid").innerHTML=(p.by_officer||[]).length?p.by_officer.map(x=>{const pct=x.total?Math.round(x.completed/x.total*100):0;return '<div class="progress-row"><span>'+esc(x.name)+' · '+x.completed+'/'+x.total+' done</span><div class="track"><i style="width:'+pct+'%"></i></div><b>'+pct+'%</b></div>'}).join(""):'<div class="empty-state">No officer assignments yet.</div>';
   $("#progressBody").innerHTML=(p.items||[]).length?p.items.map(x=>'<tr><td class="control-name"><b>'+esc(x.control_code)+' · '+esc(x.title)+'</b><span>'+esc(x.category)+'</span></td><td>'+esc(x.assigned_user_name||"Unassigned")+'</td><td>'+esc(x.frequency)+'</td><td>'+tag(x.risk_level)+'</td><td><span class="work-status '+String(x.work_status).toLowerCase().replace(/\s+/g,"-")+'">'+esc(x.work_status)+'</span></td><td>'+esc(x.period_evidence||0)+'</td><td>'+esc(x.open_findings||0)+'</td><td>'+fmtDate(x.next_due)+'</td><td><button class="action-btn" data-progress-control="'+x.id+'">Open</button></td></tr>').join(""):'<tr><td colspan="10" class="empty-state">No controls in the selected scope.</td></tr>';
-  $("[data-progress-control]").forEach(b=>b.onclick=()=>openControl(Number(b.dataset.progressControl)));
+  $$("[data-progress-control]").forEach(b=>b.onclick=()=>openControl(Number(b.dataset.progressControl)));
   if($("#progressOfficer")){
     const old=$("#progressOfficer").value;
     const users=(state.users||[]).filter(u=>["control_manager","control_officer"].includes(u.role));
@@ -134,19 +134,19 @@ function renderControls(){
 }
 function renderEvidence(){
   $("#evidenceGrid").innerHTML=state.evidence.length?state.evidence.map(e=>'<article class="evidence-card"><div class="evidence-card-head"><span class="doc-icon">'+(e.file_id?"FILE":"SRC")+'</span>'+tag(e.review_status||e.status)+'</div><h3>'+esc(e.title)+'</h3><p>'+esc(e.control_code)+" · "+esc(e.control_title)+'</p><div class="evidence-meta"><div><small>SOURCE</small><b>'+esc(e.source)+'</b></div><div><small>PERIOD</small><b>'+esc(e.period||"—")+'</b></div><div><small>COLLECTED</small><b>'+fmtDate(e.collected_at||e.created_at)+'</b></div><div><small>TYPE</small><b>'+esc(e.evidence_type)+'</b></div></div>'+(e.sha256?'<div class="fingerprint">SHA-256 '+esc(e.sha256)+'</div>':'')+'<div class="evidence-actions">'+(e.file_id?'<button class="action-btn" data-download-file="'+e.file_id+'">Download source</button><button class="action-btn" data-verify-evidence="'+e.id+'">Verify integrity</button>':'')+(e.url?'<button class="action-btn" data-open-url="'+esc(e.url)+'">Open source</button>':'')+(has("evidence.write")?'<button class="action-btn dark" data-review-evidence="'+e.id+'">Review</button>':'')+'</div></article>').join(""):'<div class="empty-state">No evidence has been added yet.</div>';
-  $("[data-download-file]").forEach(b=>b.onclick=()=>downloadEvidence(Number(b.dataset.downloadFile)));
-  $("[data-verify-evidence]").forEach(b=>b.onclick=()=>verifyEvidence(Number(b.dataset.verifyEvidence)));
-  $("[data-open-url]").forEach(b=>b.onclick=()=>window.open(b.dataset.openUrl,"_blank","noopener"));
-  $("[data-review-evidence]").forEach(b=>b.onclick=()=>reviewEvidence(Number(b.dataset.reviewEvidence)));
+  $$("[data-download-file]").forEach(b=>b.onclick=()=>downloadEvidence(Number(b.dataset.downloadFile)));
+  $$("[data-verify-evidence]").forEach(b=>b.onclick=()=>verifyEvidence(Number(b.dataset.verifyEvidence)));
+  $$("[data-open-url]").forEach(b=>b.onclick=()=>window.open(b.dataset.openUrl,"_blank","noopener"));
+  $$("[data-review-evidence]").forEach(b=>b.onclick=()=>reviewEvidence(Number(b.dataset.reviewEvidence)));
 }
 function renderAssessments(){
   $("#assessmentsBody").innerHTML=state.assessments.length?state.assessments.map(a=>'<tr><td class="control-name"><b>'+esc(a.control_code)+" · "+esc(a.control_title)+'</b></td><td>'+esc(a.period)+'</td><td>'+tag(a.result)+'</td><td><b>'+esc(a.score??"—")+(a.score!=null?"%":"")+'</b></td><td>'+esc(a.tester_name||"—")+'</td><td>'+tag(a.review_status)+'</td><td>'+fmtDate(a.tested_at)+'</td><td>'+(has("assessments.review")?'<button class="action-btn" data-review-test="'+a.id+'">Review</button>':'')+'</td></tr>').join(""):'<tr><td colspan="8" class="empty-state">No control tests recorded.</td></tr>';
-  $("[data-review-test]").forEach(b=>b.onclick=()=>reviewAssessment(Number(b.dataset.reviewTest)));
+  $$("[data-review-test]").forEach(b=>b.onclick=()=>reviewAssessment(Number(b.dataset.reviewTest)));
 }
 function renderFindings(){
   const cols=[["Open",x=>x.status==="Open"],["In Progress",x=>["In Progress","Remediation"].includes(x.status)],["Closed",x=>["Closed","Resolved"].includes(x.status)]];
   $("#findingBoard").innerHTML=cols.map(([name,test])=>{const items=state.findings.filter(test);return '<section class="finding-column"><div class="finding-column-head"><b>'+name+'</b><span>'+items.length+'</span></div>'+items.map(f=>'<article class="finding-card" data-open-finding="'+f.id+'"><div>'+tag(f.severity)+'</div><h3>'+esc(f.title)+'</h3><p>'+esc(f.control_code||"No linked control")+(f.description?" · "+esc(f.description):"")+'</p><div class="finding-card-foot"><span>'+esc(f.owner||"Unassigned")+' · '+fmtDate(f.due_date)+'</span>'+(has("findings.write")?'<select data-finding-status="'+f.id+'"><option '+(f.status==="Open"?"selected":"")+'>Open</option><option '+(["In Progress","Remediation"].includes(f.status)?"selected":"")+'>In Progress</option><option '+(["Closed","Resolved"].includes(f.status)?"selected":"")+'>Resolved</option></select>':tag(f.status))+'</div></article>').join("")+'</section>'}).join("");
-  $("[data-finding-status]").forEach(s=>{s.onclick=e=>e.stopPropagation();s.onchange=()=>updateFinding(Number(s.dataset.findingStatus),s.value)});$("[data-open-finding]").forEach(card=>card.onclick=()=>openFinding(Number(card.dataset.openFinding)));
+  $$("[data-finding-status]").forEach(s=>{s.onclick=e=>e.stopPropagation();s.onchange=()=>updateFinding(Number(s.dataset.findingStatus),s.value)});$$("[data-open-finding]").forEach(card=>card.onclick=()=>openFinding(Number(card.dataset.openFinding)));
 }
 function openFinding(id){
   const f=state.findings.find(x=>x.id===id);if(!f)return;
@@ -275,7 +275,7 @@ function renderAudit(){
 }
 function renderUsers(){
   $("#usersBody").innerHTML=state.users.length?state.users.map(u=>'<tr><td class="control-name"><b>'+esc(u.name)+'</b></td><td>'+esc(u.email)+'</td><td>'+tag(humanRole(u.role))+'</td><td>'+tag(u.status)+'</td><td>'+fmtDate(u.created_at)+'</td><td>'+(has("users.write")&&u.id!==state.user?.id?'<button class="action-btn" data-user-status="'+u.id+'" data-next-status="'+(u.status==="active"?"disabled":"active")+'">'+(u.status==="active"?"Disable":"Enable")+'</button>':'')+'</td></tr>').join(""):'<tr><td colspan="6" class="empty-state">No users available.</td></tr>';
-  $("[data-user-status]").forEach(b=>b.onclick=()=>setUserStatus(Number(b.dataset.userStatus),b.dataset.nextStatus));
+  $$("[data-user-status]").forEach(b=>b.onclick=()=>setUserStatus(Number(b.dataset.userStatus),b.dataset.nextStatus));
 }
 function renderSettings(){
   if(!state.organization||!$("#orgSettingsForm"))return;
@@ -412,7 +412,7 @@ roles:['Roles & access','Role-based access separates administration, control man
 };
 function renderManual(key){
   if(!$("#manualContent"))return;const m=manual[key]||manual.start;$("#manualContent").innerHTML='<span class="caps">USER MANUAL</span><h2>'+m[0]+'</h2><p>'+m[1]+'</p>'+m[2];
-  $$("[data-manual]").forEach(b=>b.classList.toggle("active",b.dataset.manual===key));
+  $$$("[data-manual]").forEach(b=>b.classList.toggle("active",b.dataset.manual===key));
 }
 function bindPageLinks(){$$("[data-page-link]").forEach(b=>b.onclick=()=>go(b.dataset.pageLink))}
 function bindOpenForms(){
@@ -447,7 +447,7 @@ $("#changePasswordForm")?.addEventListener("submit",async e=>{
   try{await api("/api/auth/change-password",{method:"POST",body:JSON.stringify(d)});e.target.reset();toast("Password changed")}
   catch(err){toast(err.message)}
 });
-$("[data-manual]").forEach(b=>b.onclick=()=>renderManual(b.dataset.manual));
+$$("[data-manual]").forEach(b=>b.onclick=()=>renderManual(b.dataset.manual));
 ["controlSearch","categoryFilter","riskFilter"].forEach(id=>$("#"+id)?.addEventListener(id==="controlSearch"?"input":"change",renderControls));
 ["integrationSearch","integrationCategory","integrationStatus"].forEach(id=>$("#"+id)?.addEventListener(id==="integrationSearch"?"input":"change",renderIntegrations));
 ["librarySearch","libraryCategory","libraryRisk"].forEach(id=>$("#"+id)?.addEventListener(id==="librarySearch"?"input":"change",renderLibrary));
