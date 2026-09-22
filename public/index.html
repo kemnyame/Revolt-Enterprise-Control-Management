@@ -118,7 +118,7 @@
     <section class="page hidden" id="controlsPage">
       <div class="page-toolbar">
         <div><span class="caps">CONTROL REGISTER</span><h1>IT controls</h1><p>Maintain the organisation's active controls, owners, risk, frequency, evidence expectations and testing status.</p></div>
-        <button class="btn dark" data-open-form="control">+ New control</button>
+        <button class="btn dark" data-open-form="control" data-permission="controls.write">+ New control</button>
       </div>
       <div class="filters">
         <input id="controlSearch" placeholder="Search control code or title"/>
@@ -131,7 +131,7 @@
     <section class="page hidden" id="evidencePage">
       <div class="page-toolbar">
         <div><span class="caps">EVIDENCE VAULT</span><h1>Evidence with integrity</h1><p>Upload original files, preserve SHA-256 fingerprints, review evidence and retain the chain from source to control test.</p></div>
-        <div class="toolbar-actions"><button class="btn outline" data-open-form="evidence">Register link</button><button class="btn dark" id="uploadEvidenceBtn">Upload file</button></div>
+        <div class="toolbar-actions" data-permission="evidence.write"><button class="btn outline" data-open-form="evidence">Register link</button><button class="btn dark" id="uploadEvidenceBtn">Upload file</button></div>
       </div>
       <div class="info-strip"><b>Integrity controls</b><span>Every uploaded file receives a SHA-256 fingerprint. Review decisions and downloads remain in the audit trail.</span></div>
       <div class="evidence-grid" id="evidenceGrid"></div>
@@ -140,16 +140,16 @@
     <section class="page hidden" id="assessmentsPage">
       <div class="page-toolbar">
         <div><span class="caps">TESTING & ASSURANCE</span><h1>Test controls</h1><p>Select a control, review its evidence, document the test procedure, record exceptions and create a finding where necessary.</p></div>
-        <button class="btn dark" id="startTestBtn">+ Test control</button>
+        <button class="btn dark" id="startTestBtn" data-permission="assessments.write">+ Test control</button>
       </div>
-      <div class="testing-callout"><div><b>Test Control</b><span>This is the core assurance workflow: evidence → procedure → result → exception → remediation → retest.</span></div><button class="btn outline" id="startTestBtn2">Start a test</button></div>
+      <div class="testing-callout"><div><b>Test Control</b><span>This is the core assurance workflow: evidence → procedure → result → exception → remediation → retest.</span></div><button class="btn outline" id="startTestBtn2" data-permission="assessments.write">Start a test</button></div>
       <div class="table-card"><table><thead><tr><th>Control</th><th>Period</th><th>Result</th><th>Score</th><th>Tester</th><th>Review</th><th>Tested</th><th></th></tr></thead><tbody id="assessmentsBody"></tbody></table></div>
     </section>
 
     <section class="page hidden" id="findingsPage">
       <div class="page-toolbar">
         <div><span class="caps">ISSUES & REMEDIATION</span><h1>Open actions to verified closure</h1><p>Assign owners and due dates, track remediation, and require a passing retest before closure.</p></div>
-        <button class="btn dark" data-open-form="finding">+ New finding</button>
+        <button class="btn dark" data-open-form="finding" data-permission="findings.write">+ New finding</button>
       </div>
       <div class="info-strip"><b>Verified closure</b><span>Findings linked to controls cannot be closed until a passing control retest exists after the finding was raised.</span></div>
       <div class="finding-board" id="findingBoard"></div>
@@ -184,9 +184,9 @@
     </section>
 
     <section class="page hidden" id="settingsPage">
-      <div class="page-toolbar"><div><span class="caps">SETTINGS & TEAM</span><h1>Workspace access</h1><p>Maintain least-privilege access for control owners, testers, reviewers, auditors and administrators.</p></div><button class="btn dark" data-open-form="user">+ Add user</button></div>
+      <div class="page-toolbar"><div><span class="caps">SETTINGS & TEAM</span><h1>Workspace access</h1><p>Maintain least-privilege access for control owners, testers, reviewers, auditors and administrators.</p></div><button class="btn dark" data-open-form="user" data-permission="users.write">+ Add user</button></div>
       <div class="settings-grid">
-        <section class="panel">
+        <section class="panel" data-permission="settings.read">
           <div class="panel-head"><div><span class="caps">ORGANISATION</span><h3>Workspace profile</h3></div></div>
           <form class="form" id="orgSettingsForm">
             <label>Organisation name<input name="name" required></label>
@@ -205,7 +205,7 @@
         </section>
       </div>
       <div class="role-strip"><span><b>Admin</b> Full workspace management</span><span><b>Control Manager</b> Controls, evidence and testing</span><span><b>Auditor</b> Testing and evidence review</span><span><b>Reviewer</b> Oversight and remediation</span><span><b>Viewer</b> Read-only access</span></div>
-      <div class="table-card"><table><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody id="usersBody"></tbody></table></div>
+      <div class="table-card" data-permission="users.read"><table><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody id="usersBody"></tbody></table></div>
     </section>
 
     <section class="page hidden" id="manualPage">
