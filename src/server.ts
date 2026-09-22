@@ -191,6 +191,40 @@ async function initDb(){
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,current_date + interval '30 days')`,[orgId,...row]);
     }
   }
+
+  const demoCount=await pool.query("SELECT count(*)::int AS count FROM assessments WHERE organization_id=$1",[orgId]);
+  if(Number(demoCount.rows[0].count)===0){
+    const controlRows=await pool.query("SELECT id,control_code FROM controls WHERE organization_id=$1",[orgId]);
+    const byCode=Object.fromEntries(controlRows.rows.map((r:any)=>[r.control_code,r.id]));
+    const samples=[
+      ["ITGC-001","Q3 2026","Effective",94,"Quarterly access review completed with two dormant privileged accounts removed."],
+      ["ITGC-004","Q3 2026","Effective",91,"Sampled production changes had approval, testing and deployment evidence."],
+      ["ITGC-006","August 2026","Partially Effective",76,"Backup success remained high but two failures were resolved outside target SLA."],
+      ["ITGC-008","August 2026","Ineffective",58,"Critical remediation SLA exceeded for a small number of internet-facing assets."],
+      ["ITGC-010","Q3 2026","Partially Effective",72,"Review completed; legacy rules require documented business-owner confirmation."]
+    ];
+    for(const [code,period,result,score,notes] of samples){
+      if(byCode[code]) await pool.query("INSERT INTO assessments(organization_id,control_id,period,result,score,notes,review_status,tested_at) VALUES($1,$2,$3,$4,$5,$6,'Reviewed',now()-interval '5 days')",[orgId,byCode[code],period,result,score,notes]);
+    }
+    const evidenceSamples=[
+      ["ITGC-001","Q3 privileged user access review","System Report","Entra ID","Q3 2026","Current"],
+      ["ITGC-004","Production change sample and approvals","Approval","ServiceNow / Jira","Q3 2026","Current"],
+      ["ITGC-006","August backup completion report","System Report","Backup Platform","August 2026","Current"],
+      ["ITGC-008","Monthly vulnerability scan report","System Report","Vulnerability Scanner","August 2026","Current"],
+      ["ITGC-010","Firewall rules review workbook","Document","Manual Upload","Q3 2026","Current"]
+    ];
+    for(const [code,title,evidenceType,source,period,status] of evidenceSamples){
+      if(byCode[code]) await pool.query("INSERT INTO evidence(organization_id,control_id,title,evidence_type,source,period,status) VALUES($1,$2,$3,$4,$5,$6,$7)",[orgId,byCode[code],title,evidenceType,source,period,status]);
+    }
+    const findingsSamples=[
+      ["ITGC-008","Critical vulnerability remediation outside SLA","Four critical vulnerabilities exceeded the approved remediation timeline.","High","Open","Security Manager",14],
+      ["ITGC-006","Backup failure escalation evidence incomplete","Two failed jobs were recovered, but escalation evidence was incomplete.","Medium","In Progress","Infrastructure Manager",21],
+      ["ITGC-010","Legacy firewall rules need business revalidation","A subset of legacy rules lacks recent business-owner confirmation.","Medium","Open","Network Manager",30]
+    ];
+    for(const [code,title,description,severity,status,owner,days] of findingsSamples){
+      if(byCode[code]) await pool.query("INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date) VALUES($1,$2,$3,$4,$5,$6,$7,current_date + ($8 || ' days')::interval)",[orgId,byCode[code],title,description,severity,status,owner,days]);
+    }
+  }
 }
 
 app.get("/api/health",async(_req,res)=>{
