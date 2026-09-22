@@ -1246,7 +1246,7 @@ async function runStartupSmokeTest(){
   if(!detail.ok) throw new Error(`Smoke test control detail failed: ${detail.status}`);
   results.controlDetail="ok";
 
-  let smokeEvidenceId:number|null=null,smokeFileId:number|null=null,smokeAssessmentId:number|null=null;
+  let smokeEvidenceId:number|null=null,smokeFileId:number|null=null,smokeAssessmentId:number|null=null,smokeFindingId:number|null=null;
   try{
     const fd=new FormData();
     fd.set("control_id",String(controlId));
@@ -1275,6 +1275,26 @@ async function runStartupSmokeTest(){
     results.testControl="ok";
     results.testReview="ok";
 
+    const progress=await fetch(base+"/api/dashboard/progress?period=quarter",{headers});
+    if(!progress.ok) throw new Error(`Smoke test progress dashboard failed: ${progress.status} ${await progress.text()}`);
+    const progressData:any=await progress.json();
+    if(!Array.isArray(progressData.items)||!progressData.summary) throw new Error("Smoke test progress dashboard returned invalid data");
+    results.progressDashboard="ok";
+
+    const finding=await fetch(base+"/api/findings",{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({
+      control_id:controlId,title:"__startup_smoke_finding__",description:"Temporary finding save/update validation.",severity:"Low",status:"Open",owner:"Startup Smoke",due_date:"2099-01-01"
+    })});
+    if(!finding.ok) throw new Error(`Smoke test finding create failed: ${finding.status} ${await finding.text()}`);
+    const findingData:any=await finding.json();smokeFindingId=Number(findingData.id);
+    const findingList=await fetch(base+"/api/findings",{headers});
+    if(!findingList.ok) throw new Error(`Smoke test finding reload failed: ${findingList.status}`);
+    const findingRows:any[]=await findingList.json();
+    if(!findingRows.some((x:any)=>Number(x.id)===smokeFindingId)) throw new Error("Smoke test finding did not persist");
+    const findingUpdate=await fetch(base+"/api/findings/"+smokeFindingId,{method:"PUT",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({status:"In Progress",owner:"Startup Smoke Updated",due_date:"2099-02-01",description:"Updated smoke remediation."})});
+    if(!findingUpdate.ok) throw new Error(`Smoke test finding update failed: ${findingUpdate.status} ${await findingUpdate.text()}`);
+    results.findingSave="ok";
+    results.findingUpdate="ok";
+
     try{
       const gh=await fetch("https://api.github.com/repos/kemnyame/Revolt-Enterprise-Control-Management",{headers:{"Accept":"application/vnd.github+json","User-Agent":"Revolt-X-Control-Smoke-Test"}});
       results.githubConnectivity=gh.ok?"ok":"unavailable:"+gh.status;
@@ -1284,6 +1304,10 @@ async function runStartupSmokeTest(){
       console.warn("GitHub connectivity smoke check failed",err?.message||err);
     }
   } finally {
+    if(smokeFindingId){
+      await pool.query("DELETE FROM audit_logs WHERE entity_type='finding' AND entity_id=$1",[smokeFindingId]).catch(()=>{});
+      await pool.query("DELETE FROM findings WHERE id=$1",[smokeFindingId]).catch(()=>{});
+    }
     if(smokeAssessmentId){
       await pool.query("DELETE FROM audit_logs WHERE entity_type='assessment' AND entity_id=$1",[smokeAssessmentId]).catch(()=>{});
       await pool.query("DELETE FROM audit_logs WHERE action='TEST_CONTROL' AND entity_type='control' AND entity_id=$1 AND details->>'assessmentId'=$2",[controlId,String(smokeAssessmentId)]).catch(()=>{});
