@@ -1,3 +1,4 @@
+window.addEventListener("unhandledrejection",e=>{console.error("Unhandled promise rejection",e.reason);const t=document.querySelector("#toast");if(t){t.textContent="An action failed. Please retry.";t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2500)}});
 const state={
   token:localStorage.getItem("revolt_token")||"",user:null,permissions:[],
   dashboard:null,controls:[],evidence:[],assessments:[],findings:[],integrations:[],automation:[],library:[],report:[],frameworkCoverage:[],evidenceFreshness:null,assuranceSummary:null,audit:[],users:[],organization:null,
@@ -62,7 +63,15 @@ function go(page){
   const titles={overview:"IT controls overview",controls:"Control register",evidence:"Evidence vault",assessments:"Testing & assurance",findings:"Issues & remediation",integrations:"Integrations",library:"Control library",audit:"Audit trail",settings:"Settings & team",users:"Settings & team",manual:"User manual",reports:"Control health",controlDetail:"Control record"};
   $("#pageTitle").textContent=titles[page]||"IT Controls";$(".sidebar").classList.remove("open");window.scrollTo(0,0);
 }
-function renderAll(){renderDashboard();renderControls();renderEvidence();renderAssessments();renderFindings();renderIntegrations();renderAutomation();renderLibrary();renderReports();renderAudit();renderUsers();renderSettings();populateFilters();renderManual("start")}
+function safeRender(name,fn){try{fn()}catch(err){console.error("Render failure:",name,err);toast(name+" could not render. Other pages remain available.")}}
+function renderAll(){
+  [
+    ["Dashboard",renderDashboard],["Controls",renderControls],["Evidence Vault",renderEvidence],["Testing",renderAssessments],
+    ["Findings",renderFindings],["Integrations",renderIntegrations],["Automation",renderAutomation],["Control Library",renderLibrary],
+    ["Control Health",renderReports],["Audit Trail",renderAudit],["Users",renderUsers],["Settings",renderSettings],["Filters",populateFilters]
+  ].forEach(([name,fn])=>safeRender(name,fn));
+  safeRender("User Manual",()=>renderManual("start"));
+}
 function renderDashboard(){
   const d=state.dashboard||{},c=d.controls||{},a=d.assessments||{},e=d.evidence||{},f=d.findings||{};
   const metrics=[
