@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Revolt-X Enterprise Control Management</title>
+  <meta name="description" content="Enterprise control management, testing, evidence, findings and audit trail."/>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css"/>
+</head>
+<body>
+  <section class="login-shell" id="loginView">
+    <div class="login-brand">
+      <div class="brand-mark">RX</div>
+      <div><b>Revolt-X</b><span>Enterprise Control Management</span></div>
+    </div>
+    <div class="login-grid">
+      <div class="login-copy">
+        <span class="eyebrow">CONTROL. EVIDENCE. ASSURANCE.</span>
+        <h1>Know your control posture before the audit does.</h1>
+        <p>Manage IT controls, testing, evidence, exceptions and remediation from one auditable workspace.</p>
+        <div class="login-points">
+          <div><b>01</b><span>Central control library</span></div>
+          <div><b>02</b><span>Evidence-led testing</span></div>
+          <div><b>03</b><span>Findings to closure</span></div>
+          <div><b>04</b><span>Complete audit trail</span></div>
+        </div>
+      </div>
+      <form class="login-card" id="loginForm">
+        <span class="eyebrow">SECURE SIGN IN</span>
+        <h2>Access your workspace</h2>
+        <p>Use the administrator or assigned user credentials.</p>
+        <label>Email address<input id="loginEmail" type="email" required autocomplete="username" placeholder="you@company.com"></label>
+        <label>Password<input id="loginPassword" type="password" required autocomplete="current-password" placeholder="••••••••"></label>
+        <button class="btn primary full">Sign in →</button>
+        <div class="form-message" id="loginMessage"></div>
+      </form>
+    </div>
+  </section>
+
+  <div class="app-shell hidden" id="appView">
+    <aside class="sidebar">
+      <div class="sidebar-brand"><div class="brand-mark">RX</div><div><b>Revolt-X</b><span>ECM Platform</span></div></div>
+      <div class="module-card">
+        <small>ACTIVE MODULE</small>
+        <b>IT Controls</b>
+        <span>Enterprise assurance</span>
+      </div>
+      <nav id="nav">
+        <button data-page="overview" class="active"><i>◫</i>Overview</button>
+        <button data-page="controls"><i>✓</i>Control Library</button>
+        <button data-page="assessments"><i>◉</i>Assessments</button>
+        <button data-page="evidence"><i>▣</i>Evidence</button>
+        <button data-page="findings"><i>!</i>Findings</button>
+        <button data-page="audit"><i>↺</i>Audit Trail</button>
+        <button data-page="users" data-permission="users.read"><i>♙</i>Users & Roles</button>
+      </nav>
+      <div class="future-modules">
+        <small>ENTERPRISE MODULES</small>
+        <span>Cybersecurity Controls</span><span>Operational Risk</span><span>Vendor Risk</span><span>Business Continuity</span><span>Internal Audit</span>
+      </div>
+      <button class="logout" id="logoutBtn">Sign out</button>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="mobile-menu" id="menuBtn">☰</button>
+        <div><span class="breadcrumb">Revolt-X / IT Controls</span><h2 id="pageTitle">Control Overview</h2></div>
+        <div class="top-actions"><button class="icon-btn" id="refreshBtn" title="Refresh">↻</button><div class="user-chip"><span id="userInitials">RX</span><div><b id="userName">User</b><small id="userRole">Role</small></div></div></div>
+      </header>
+
+      <section class="page" id="overviewPage">
+        <div class="hero-panel">
+          <div><span class="eyebrow">IT CONTROL ASSURANCE</span><h1>Control posture at a glance.</h1><p>Monitor design, operating effectiveness, supporting evidence and unresolved exceptions across your IT control environment.</p></div>
+          <button class="btn light" data-open-form="assessment">Record assessment</button>
+        </div>
+        <div class="metric-grid" id="metricGrid"></div>
+        <div class="two-col">
+          <section class="panel"><div class="panel-head"><div><small>CONTROL COVERAGE</small><h3>Controls by category</h3></div></div><div id="categoryChart" class="bar-list"></div></section>
+          <section class="panel"><div class="panel-head"><div><small>RECENT ACTIVITY</small><h3>Audit activity</h3></div><button class="text-btn" data-page-link="audit">View all</button></div><div id="activityList" class="activity-list"></div></section>
+        </div>
+        <section class="panel"><div class="panel-head"><div><small>ATTENTION REQUIRED</small><h3>Open findings</h3></div><button class="text-btn" data-page-link="findings">Manage findings</button></div><div id="overviewFindings"></div></section>
+      </section>
+
+      <section class="page hidden" id="controlsPage">
+        <div class="page-toolbar"><div><span class="eyebrow">CONTROL LIBRARY</span><h1>IT Controls</h1><p>Define, assign and monitor the controls that protect critical systems and processes.</p></div><button class="btn primary" data-open-form="control">+ New control</button></div>
+        <div class="filters"><input id="controlSearch" placeholder="Search control code or title"><select id="categoryFilter"><option value="">All categories</option></select><select id="riskFilter"><option value="">All risk levels</option><option>High</option><option>Medium</option><option>Low</option></select></div>
+        <div class="table-card"><table><thead><tr><th>Control</th><th>Category</th><th>Owner</th><th>Frequency</th><th>Risk</th><th>Latest test</th><th>Evidence</th><th>Open findings</th></tr></thead><tbody id="controlsBody"></tbody></table></div>
+      </section>
+
+      <section class="page hidden" id="assessmentsPage">
+        <div class="page-toolbar"><div><span class="eyebrow">TESTING & ASSURANCE</span><h1>Control Assessments</h1><p>Record test outcomes and maintain an evidence-backed assessment history.</p></div><button class="btn primary" data-open-form="assessment">+ Record assessment</button></div>
+        <div class="table-card"><table><thead><tr><th>Control</th><th>Period</th><th>Result</th><th>Score</th><th>Tester</th><th>Review</th><th>Tested</th></tr></thead><tbody id="assessmentsBody"></tbody></table></div>
+      </section>
+
+      <section class="page hidden" id="evidencePage">
+        <div class="page-toolbar"><div><span class="eyebrow">EVIDENCE REGISTER</span><h1>Control Evidence</h1><p>Maintain traceable support for each control and assessment period.</p></div><button class="btn primary" data-open-form="evidence">+ Add evidence</button></div>
+        <div class="evidence-grid" id="evidenceGrid"></div>
+      </section>
+
+      <section class="page hidden" id="findingsPage">
+        <div class="page-toolbar"><div><span class="eyebrow">ISSUES & REMEDIATION</span><h1>Findings</h1><p>Track control exceptions from identification through accountable closure.</p></div><button class="btn primary" data-open-form="finding">+ New finding</button></div>
+        <div class="finding-board" id="findingBoard"></div>
+      </section>
+
+      <section class="page hidden" id="auditPage">
+        <div class="page-toolbar"><div><span class="eyebrow">AUDITABILITY</span><h1>Audit Trail</h1><p>Review system activity and changes across your control environment.</p></div></div>
+        <div class="table-card"><table><thead><tr><th>Date & time</th><th>User</th><th>Action</th><th>Entity</th><th>Reference</th><th>Details</th></tr></thead><tbody id="auditBody"></tbody></table></div>
+      </section>
+
+      <section class="page hidden" id="usersPage">
+        <div class="page-toolbar"><div><span class="eyebrow">ACCESS MANAGEMENT</span><h1>Users & Roles</h1><p>Assign people to the platform using least-privilege roles.</p></div><button class="btn primary" data-open-form="user">+ Add user</button></div>
+        <div class="role-strip"><span><b>Admin</b> Full platform management</span><span><b>Control Manager</b> Manage controls and testing</span><span><b>Auditor</b> Test and review evidence</span><span><b>Reviewer</b> Oversight and remediation</span><span><b>Viewer</b> Read-only access</span></div>
+        <div class="table-card"><table><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th></tr></thead><tbody id="usersBody"></tbody></table></div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal hidden" id="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-card"><button class="modal-close" data-close-modal>×</button><div id="modalBody"></div></div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
