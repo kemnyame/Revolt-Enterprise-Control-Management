@@ -185,8 +185,27 @@
 
     <section class="page hidden" id="settingsPage">
       <div class="page-toolbar"><div><span class="caps">SETTINGS & TEAM</span><h1>Workspace access</h1><p>Maintain least-privilege access for control owners, testers, reviewers, auditors and administrators.</p></div><button class="btn dark" data-open-form="user">+ Add user</button></div>
+      <div class="settings-grid">
+        <section class="panel">
+          <div class="panel-head"><div><span class="caps">ORGANISATION</span><h3>Workspace profile</h3></div></div>
+          <form class="form" id="orgSettingsForm">
+            <label>Organisation name<input name="name" required></label>
+            <div class="form-grid"><label>Industry<input name="industry"></label><label>Country<input name="country"></label></div>
+            <div class="form-grid"><label>Timezone<input name="timezone" placeholder="Africa/Accra"></label><label>Contact email<input name="contact_email" type="email"></label></div>
+            <div class="form-actions"><button class="btn dark">Save organisation</button></div>
+          </form>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><div><span class="caps">ACCOUNT SECURITY</span><h3>Change your password</h3></div></div>
+          <form class="form" id="changePasswordForm">
+            <label>Current password<input name="current_password" type="password" required></label>
+            <label>New password<input name="new_password" type="password" minlength="10" required></label>
+            <div class="form-actions"><button class="btn dark">Change password</button></div>
+          </form>
+        </section>
+      </div>
       <div class="role-strip"><span><b>Admin</b> Full workspace management</span><span><b>Control Manager</b> Controls, evidence and testing</span><span><b>Auditor</b> Testing and evidence review</span><span><b>Reviewer</b> Oversight and remediation</span><span><b>Viewer</b> Read-only access</span></div>
-      <div class="table-card"><table><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th></tr></thead><tbody id="usersBody"></tbody></table></div>
+      <div class="table-card"><table><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody id="usersBody"></tbody></table></div>
     </section>
 
     <section class="page hidden" id="manualPage">
