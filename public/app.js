@@ -1,25 +1,33 @@
-const state={token:localStorage.getItem("revolt_token")||"",user:null,permissions:[],controls:[],assessments:[],evidence:[],findings:[],integrations:[],automation:[],report:[],frameworkCoverage:[],evidenceFreshness:null,assuranceSummary:null,audit:[],users:[],dashboard:null,page:"overview"};
-const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const state={
+  token:localStorage.getItem("revolt_token")||"",user:null,permissions:[],
+  dashboard:null,controls:[],evidence:[],assessments:[],findings:[],integrations:[],audit:[],users:[],
+  page:"overview",currentControl:null
+};
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 const fmtDate=v=>v?new Date(v).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}):"—";
 const fmtTime=v=>v?new Date(v).toLocaleString("en-GB",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}):"—";
-const tag=v=>'<span class="tag '+String(v||"").toLowerCase().replace(/\s+/g,"-")+'">'+esc(v||"—")+"</span>";
+const initials=name=>String(name||"RX").split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase();
+const humanRole=r=>String(r||"").replace(/_/g," ").replace(/\b\w/g,m=>m.toUpperCase());
 const has=p=>state.permissions.includes(p);
-function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2200)}
+const tag=v=>'<span class="tag '+String(v||"").toLowerCase().replace(/\s+/g,"-")+'">'+esc(v||"—")+"</span>";
+function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2500)}
 async function api(url,opt={}){
-  const headers={"Content-Type":"application/json",...(opt.headers||{})}; if(state.token)headers.Authorization="Bearer "+state.token;
-  const r=await fetch(url,{...opt,headers}); let data={}; try{data=await r.json()}catch{}
+  const headers={...(opt.headers||{})};if(!(opt.body instanceof FormData))headers["Content-Type"]="application/json";if(state.token)headers.Authorization="Bearer "+state.token;
+  const r=await fetch(url,{...opt,headers});let data=null;const ct=r.headers.get("content-type")||"";
+  try{data=ct.includes("json")?await r.json():await r.text()}catch{data=null}
   if(r.status===401&&url!=="/api/auth/login"){logout();throw new Error("Session expired")}
-  if(!r.ok)throw new Error(data.error||"Request failed"); return data;
+  if(!r.ok)throw new Error(data?.error||data||"Request failed");return data;
 }
-function initials(name){return String(name||"RX").split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase()}
-function humanRole(r){return String(r||"").replace(/_/g," ").replace(/\b\w/g,m=>m.toUpperCase())}
+function modal(html,wide=false){$("#modalBody").innerHTML=html;$("#modal").classList.remove("hidden");$(".modal-card").classList.toggle("wide",wide);bindModalClose()}
+function closeModal(){$("#modal").classList.add("hidden");$("#modalBody").innerHTML="";$(".modal-card").classList.remove("wide")}
+function bindModalClose(){$$("[data-close-modal]").forEach(b=>b.onclick=closeModal)}
 function loginView(show){$("#loginView").classList.toggle("hidden",!show);$("#appView").classList.toggle("hidden",show)}
 async function login(e){
   e.preventDefault();$("#loginMessage").textContent="";
   try{
-    const data=await api("/api/auth/login",{method:"POST",body:JSON.stringify({email:$("#loginEmail").value,password:$("#loginPassword").value})});
-    state.token=data.token;state.user=data.user;state.permissions=data.permissions;localStorage.setItem("revolt_token",state.token);loginView(false);setupUser();await loadAll();
+    const d=await api("/api/auth/login",{method:"POST",body:JSON.stringify({email:$("#loginEmail").value,password:$("#loginPassword").value})});
+    state.token=d.token;state.user=d.user;state.permissions=d.permissions;localStorage.setItem("revolt_token",state.token);loginView(false);setupUser();await loadAll();
   }catch(err){$("#loginMessage").textContent=err.message}
 }
 function logout(){localStorage.removeItem("revolt_token");state.token="";state.user=null;loginView(true)}
@@ -29,160 +37,221 @@ function setupUser(){
 }
 async function restore(){
   if(!state.token)return loginView(true);
-  try{const data=await api("/api/auth/me");state.user=data.user;state.permissions=data.permissions;loginView(false);setupUser();await loadAll()}catch{logout()}
+  try{const d=await api("/api/auth/me");state.user=d.user;state.permissions=d.permissions;loginView(false);setupUser();await loadAll()}catch{logout()}
 }
 async function loadAll(){
   document.body.classList.add("loading");
   try{
-    const jobs=[api("/api/dashboard"),api("/api/controls"),api("/api/assessments"),api("/api/evidence"),api("/api/findings"),api("/api/integrations"),api("/api/automation"),api("/api/reports/control-health"),api("/api/reports/framework-coverage"),api("/api/reports/evidence-freshness"),api("/api/reports/assurance-summary"),has("audit.read")?api("/api/audit"):Promise.resolve([]),has("users.read")?api("/api/users"):Promise.resolve([])];
-    const [dashboard,controls,assessments,evidence,findings,integrations,automation,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users]=await Promise.all(jobs);
-    Object.assign(state,{dashboard,controls,assessments,evidence,findings,integrations,automation,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users});renderAll();
-  }catch(err){toast(err.message)}finally{document.body.classList.remove("loading")}
+    const jobs=[
+      api("/api/dashboard"),api("/api/controls"),api("/api/evidence"),api("/api/assessments"),api("/api/findings"),api("/api/integrations"),
+      has("audit.read")?api("/api/audit"):Promise.resolve([]),has("users.read")?api("/api/users"):Promise.resolve([])
+    ];
+    const [dashboard,controls,evidence,assessments,findings,integrations,audit,users]=await Promise.all(jobs);
+    Object.assign(state,{dashboard,controls,evidence,assessments,findings,integrations,audit,users});renderAll();
+  }catch(e){toast(e.message)}finally{document.body.classList.remove("loading")}
 }
-function renderAll(){renderDashboard();renderControls();renderAssessments();renderEvidence();renderIntegrations();renderAutomation();renderFindings();renderReports();renderAudit();renderUsers();populateFilters()}
+async function refresh(parts=["dashboard","controls","evidence","assessments","findings","integrations","audit","users"]){
+  const routes={dashboard:"/api/dashboard",controls:"/api/controls",evidence:"/api/evidence",assessments:"/api/assessments",findings:"/api/findings",integrations:"/api/integrations",audit:"/api/audit",users:"/api/users"};
+  for(const p of parts){if((p==="audit"&&!has("audit.read"))||(p==="users"&&!has("users.read")))continue;state[p]=await api(routes[p])}
+  renderAll();
+}
 function go(page){
-  state.page=page;$$(".page").forEach(p=>p.classList.add("hidden"));$("#"+page+"Page")?.classList.remove("hidden");
+  state.page=page;$$(".page").forEach(x=>x.classList.add("hidden"));$("#"+page+"Page")?.classList.remove("hidden");
   $$("[data-page]").forEach(b=>b.classList.toggle("active",b.dataset.page===page));
-  const titles={overview:"Control Overview",controls:"Control Library",assessments:"Control Assessments",evidence:"Evidence Register",integrations:"Integration Hub",automation:"Evidence Automation",findings:"Findings & Remediation",reports:"Control Health",audit:"Audit Trail",users:"Users & Roles"};
+  const titles={overview:"IT controls overview",controls:"Control register",evidence:"Evidence vault",assessments:"Testing & assurance",findings:"Issues & remediation",integrations:"Integrations",library:"Control library",audit:"Audit trail",settings:"Settings & team",manual:"User manual",controlDetail:"Control record"};
   $("#pageTitle").textContent=titles[page]||"IT Controls";$(".sidebar").classList.remove("open");window.scrollTo(0,0);
 }
+function renderAll(){renderDashboard();renderControls();renderEvidence();renderAssessments();renderFindings();renderIntegrations();renderLibrary();renderAudit();renderUsers();populateFilters();renderManual("start")}
 function renderDashboard(){
-  const d=state.dashboard||{};const c=d.controls||{},a=d.assessments||{},f=d.findings||{},e=d.evidence||{};
+  const d=state.dashboard||{},c=d.controls||{},a=d.assessments||{},e=d.evidence||{},f=d.findings||{};
   const metrics=[
-    ["Controls",c.total||0,(c.high_risk||0)+" high-risk","✓"],
-    ["Effectiveness",(d.effectiveness||0)+"%",(a.total||0)+" assessments","◉"],
-    ["Evidence",e.total||0,"registered items","▣"],
-    ["Open findings",f.open||0,(f.high_open||0)+" high severity","!"],
-    ["Tests completed",a.total||0,(a.ineffective||0)+" ineffective","↗"]
+    ["Active controls",c.total||0,(c.high_risk||0)+" high risk","☷"],
+    ["Test effectiveness",(d.effectiveness||0)+"%",(a.total||0)+" tests recorded","✓"],
+    ["Evidence items",e.total||0,"source records in vault","▣"],
+    ["Open issues",f.open||0,(f.high_open||0)+" high severity","!"],
+    ["Integrations",state.integrations.filter(i=>i.status==="Connected").length,state.integrations.length+" available connectors","⌁"]
   ];
-  $("#metricGrid").innerHTML=metrics.map(x=>'<div class="metric"><div class="metric-top"><small>'+esc(x[0])+'</small><span class="metric-icon">'+x[3]+'</span></div><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
+  $("#metricGrid").innerHTML=metrics.map(m=>'<div class="metric"><div class="metric-top"><small>'+esc(m[0])+'</small><span class="metric-icon">'+m[3]+'</span></div><strong>'+esc(m[1])+'</strong><p>'+esc(m[2])+'</p></div>').join("");
   const cats=d.categories||[],max=Math.max(1,...cats.map(x=>Number(x.total)));
-  $("#categoryChart").innerHTML=cats.length?cats.slice(0,7).map(x=>'<div class="bar-row"><span title="'+esc(x.category)+'">'+esc(x.category)+'</span><div class="bar-track"><i style="width:'+(Number(x.total)/max*100)+'%"></i></div><b>'+x.total+"</b></div>").join(""):'<div class="empty-state">No control categories yet.</div>';
-  $("#activityList").innerHTML=(d.recentActivity||[]).length?(d.recentActivity||[]).map(x=>'<div class="activity-item"><span>↺</span><div><b>'+esc(x.action)+" "+esc(x.entity_type)+'</b><small>'+esc(x.name||"System")+'</small></div><time>'+fmtTime(x.created_at)+"</time></div>").join(""):'<div class="empty-state">No activity yet.</div>';
-  const open=state.findings.filter(x=>!["Closed","Resolved"].includes(x.status)).slice(0,5);
-  $("#overviewFindings").innerHTML=open.length?'<div class="table-card"><table><thead><tr><th>Finding</th><th>Control</th><th>Severity</th><th>Owner</th><th>Due</th><th>Status</th></tr></thead><tbody>'+open.map(f=>'<tr><td class="control-name"><b>'+esc(f.title)+'</b></td><td>'+esc(f.control_code||"—")+'</td><td>'+tag(f.severity)+'</td><td>'+esc(f.owner||"Unassigned")+'</td><td>'+fmtDate(f.due_date)+'</td><td>'+tag(f.status)+'</td></tr>').join("")+"</tbody></table></div>":'<div class="empty-state">No open findings. Your control environment is clear of recorded exceptions.</div>';
+  $("#categoryChart").innerHTML=cats.length?cats.slice(0,10).map(x=>'<div class="bar-row"><span title="'+esc(x.category)+'">'+esc(x.category)+'</span><div class="bar-track"><i style="width:'+(Number(x.total)/max*100)+'%"></i></div><b>'+x.total+'</b></div>').join(""):'<div class="empty-state">No controls yet.</div>';
+  $("#activityList").innerHTML=(d.recentActivity||[]).length?(d.recentActivity||[]).map(x=>'<div class="activity-item"><span>↺</span><div><b>'+esc(x.action)+" "+esc(x.entity_type)+'</b><small>'+esc(x.name||"System")+'</small></div><time>'+fmtTime(x.created_at)+'</time></div>').join(""):'<div class="empty-state">No activity yet.</div>';
+  const open=state.findings.filter(x=>!["Closed","Resolved"].includes(x.status)).slice(0,6);
+  $("#overviewFindings").innerHTML=open.length?'<div class="table-card"><table><thead><tr><th>Issue</th><th>Control</th><th>Severity</th><th>Owner</th><th>Due</th><th>Status</th></tr></thead><tbody>'+open.map(x=>'<tr><td class="control-name"><b>'+esc(x.title)+'</b></td><td>'+esc(x.control_code||"—")+'</td><td>'+tag(x.severity)+'</td><td>'+esc(x.owner||"Unassigned")+'</td><td>'+fmtDate(x.due_date)+'</td><td>'+tag(x.status)+'</td></tr>').join("")+'</tbody></table></div>':'<div class="empty-state">No open issues.</div>';
 }
 function filteredControls(){
   const q=$("#controlSearch")?.value?.toLowerCase()||"",cat=$("#categoryFilter")?.value||"",risk=$("#riskFilter")?.value||"";
-  return state.controls.filter(c=>(!q||(c.title+" "+c.control_code).toLowerCase().includes(q))&&(!cat||c.category===cat)&&(!risk||c.risk_level===risk));
+  return state.controls.filter(c=>(!q||(c.control_code+" "+c.title).toLowerCase().includes(q))&&(!cat||c.category===cat)&&(!risk||c.risk_level===risk));
 }
 function renderControls(){
   const rows=filteredControls();
-  $("#controlsBody").innerHTML=rows.length?rows.map(c=>'<tr><td class="control-name"><b>'+esc(c.control_code)+" · "+esc(c.title)+'</b><span>'+esc(c.framework_ref||"No framework mapping")+'</span></td><td>'+esc(c.category)+'</td><td>'+esc(c.owner||"Unassigned")+'</td><td>'+esc(c.frequency)+'</td><td>'+tag(c.risk_level)+'</td><td>'+tag(c.latest_result||"Not Tested")+'</td><td>'+esc(c.evidence_count||0)+'</td><td>'+esc(c.open_findings||0)+"</td></tr>").join(""):'<tr><td colspan="8" class="empty-state">No controls match the current filters.</td></tr>';
-}
-function renderAssessments(){
-  $("#assessmentsBody").innerHTML=state.assessments.length?state.assessments.map(a=>'<tr><td class="control-name"><b>'+esc(a.control_code)+" · "+esc(a.control_title)+'</b></td><td>'+esc(a.period)+'</td><td>'+tag(a.result)+'</td><td><b>'+esc(a.score??"—")+(a.score!=null?"%":"")+'</b></td><td>'+esc(a.tester_name||"—")+'</td><td>'+tag(a.review_status)+'</td><td>'+fmtDate(a.tested_at)+"</td></tr>").join(""):'<tr><td colspan="7" class="empty-state">No control assessments have been recorded yet.</td></tr>';
+  $("#controlsBody").innerHTML=rows.length?rows.map(c=>'<tr><td class="control-name"><b>'+esc(c.control_code)+" · "+esc(c.title)+'</b><span>'+esc(c.framework_ref||"No framework mapping")+'</span></td><td>'+esc(c.category)+'</td><td>'+esc(c.owner||"Unassigned")+'</td><td>'+esc(c.frequency)+'</td><td>'+tag(c.risk_level)+'</td><td>'+tag(c.latest_result||"Not Tested")+'</td><td>'+esc(c.evidence_count||0)+'</td><td>'+esc(c.open_findings||0)+'</td><td><div class="row-actions"><button class="action-btn" data-view-control="'+c.id+'">Open</button><button class="action-btn dark" data-test-control="'+c.id+'">Test control</button></div></td></tr>').join(""):'<tr><td colspan="9" class="empty-state">No controls match the current filters.</td></tr>';
+  $$("[data-view-control]").forEach(b=>b.onclick=()=>openControl(Number(b.dataset.viewControl)));
+  $$("[data-test-control]").forEach(b=>b.onclick=()=>openTestControl(Number(b.dataset.testControl)));
 }
 function renderEvidence(){
-  $("#evidenceGrid").innerHTML=state.evidence.length?state.evidence.map(e=>'<article class="evidence-card"><div class="evidence-card-head"><span class="doc-icon">▣</span>'+tag(e.status)+'</div><h3>'+esc(e.title)+'</h3><p>'+esc(e.control_code)+" · "+esc(e.control_title)+'</p><div class="evidence-meta"><div><small>TYPE</small><b>'+esc(e.evidence_type)+'</b></div><div><small>SOURCE</small><b>'+esc(e.source)+'</b></div><div><small>PERIOD</small><b>'+esc(e.period||"—")+'</b></div><div><small>ADDED BY</small><b>'+esc(e.uploaded_by_name||"—")+"</b></div></div>"+(e.url?'<p><a href="'+esc(e.url)+'" target="_blank" rel="noopener">Open evidence source →</a></p>':"")+"</article>").join(""):'<div class="empty-state">No evidence has been registered yet.</div>';
+  $("#evidenceGrid").innerHTML=state.evidence.length?state.evidence.map(e=>'<article class="evidence-card"><div class="evidence-card-head"><span class="doc-icon">'+(e.file_id?"FILE":"SRC")+'</span>'+tag(e.review_status||e.status)+'</div><h3>'+esc(e.title)+'</h3><p>'+esc(e.control_code)+" · "+esc(e.control_title)+'</p><div class="evidence-meta"><div><small>SOURCE</small><b>'+esc(e.source)+'</b></div><div><small>PERIOD</small><b>'+esc(e.period||"—")+'</b></div><div><small>COLLECTED</small><b>'+fmtDate(e.collected_at||e.created_at)+'</b></div><div><small>TYPE</small><b>'+esc(e.evidence_type)+'</b></div></div>'+(e.sha256?'<div class="fingerprint">SHA-256 '+esc(e.sha256)+'</div>':'')+'<div class="evidence-actions">'+(e.file_id?'<button class="action-btn" data-download-file="'+e.file_id+'">Download source</button>':'')+(e.url?'<button class="action-btn" data-open-url="'+esc(e.url)+'">Open source</button>':'')+(has("evidence.write")?'<button class="action-btn dark" data-review-evidence="'+e.id+'">Review</button>':'')+'</div></article>').join(""):'<div class="empty-state">No evidence has been added yet.</div>';
+  $$("[data-download-file]").forEach(b=>b.onclick=()=>downloadEvidence(Number(b.dataset.downloadFile)));
+  $$("[data-open-url]").forEach(b=>b.onclick=()=>window.open(b.dataset.openUrl,"_blank","noopener"));
+  $$("[data-review-evidence]").forEach(b=>b.onclick=()=>reviewEvidence(Number(b.dataset.reviewEvidence)));
 }
-function filteredIntegrations(){
-  const q=$("#integrationSearch")?.value?.toLowerCase()||"",cat=$("#integrationCategory")?.value||"",status=$("#integrationStatus")?.value||"";
-  return state.integrations.filter(i=>(!q||(i.name+" "+i.category+" "+(i.capabilities||[]).join(" ")).toLowerCase().includes(q))&&(!cat||i.category===cat)&&(!status||i.status===status));
-}
-function renderIntegrations(){
-  const all=state.integrations, connected=all.filter(i=>i.status==="Connected").length, configured=all.filter(i=>i.status==="Configured").length;
-  const automated=state.automation.length;
-  $("#integrationSummary").innerHTML=[
-    ["Available connectors",all.length,"Identity, cloud, ITSM, SIEM, endpoint and more"],
-    ["Connected",connected,"Validated source connections"],
-    ["Configured",configured,"Awaiting live connector validation"],
-    ["Automation rules",automated,"Mapped control evidence rules"]
-  ].map(x=>'<div class="metric"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
-  const cats=[...new Set(all.map(i=>i.category))].sort(); if($("#integrationCategory")){const old=$("#integrationCategory").value;$("#integrationCategory").innerHTML='<option value="">All categories</option>'+cats.map(x=>'<option>'+esc(x)+'</option>').join("");$("#integrationCategory").value=old}
-  const rows=filteredIntegrations();
-  $("#integrationGrid").innerHTML=rows.length?rows.map(i=>{
-    const caps=Array.isArray(i.capabilities)?i.capabilities:[];
-    return '<article class="integration-card"><div class="integration-card-head"><span class="integration-logo">'+initials(i.name)+'</span>'+tag(i.status)+'</div><h3>'+esc(i.name)+'</h3><p>'+esc(i.category)+' · '+esc(i.auth_type)+'</p><div class="capabilities">'+caps.slice(0,6).map(x=>'<span>'+esc(x)+'</span>').join("")+'</div><div class="integration-foot"><span>'+esc(i.automation_count||0)+' automation rules</span>'+(has("integrations.write")?'<button data-integration-setup="'+i.id+'">'+(i.status==="Available"?"Configure":"Review setup")+' →</button>':"")+'</div></article>'
-  }).join(""):'<div class="empty-state">No integrations match the current filters.</div>';
-  $("[data-integration-setup]").forEach(b=>b.onclick=()=>openIntegration(Number(b.dataset.integrationSetup)));
-}
-function renderAutomation(){
-  $("#automationBody").innerHTML=state.automation.length?state.automation.map(a=>'<tr><td class="control-name"><b>'+esc(a.name)+'</b><span>'+esc(a.evidence_type)+'</span></td><td>'+esc(a.control_code)+' · '+esc(a.control_title)+'</td><td>'+esc(a.integration_name)+'</td><td>'+esc(a.schedule)+'</td><td>'+tag(a.integration_status)+'</td><td>'+fmtTime(a.last_run_at)+'</td><td>'+tag(a.status)+'</td><td><button class="mini-action" data-run-automation="'+a.id+'" '+(a.integration_status==="Connected"?"":"disabled")+'>Run now</button></td></tr>').join(""):'<tr><td colspan="8" class="empty-state">No automation rules configured.</td></tr>';
-  $("[data-run-automation]").forEach(b=>b.onclick=()=>runAutomation(Number(b.dataset.runAutomation)));
-}
-async function runAutomation(id){
-  try{await api("/api/automation/"+id+"/run",{method:"POST"});toast("Automation completed");await refresh(["automation","evidence","dashboard","audit"])}
-  catch(e){toast(e.message)}
-}
-function renderReports(){
-  const rows=state.report||[], tested=rows.filter(r=>r.latest_result!=="Not Tested"), avg=tested.length?Math.round(tested.reduce((s,r)=>s+Number(r.score||0),0)/tested.length):0;
-  const summary=state.assuranceSummary||{}, freshness=state.evidenceFreshness||{};
-  $("#reportSummary").innerHTML=[
-    ["Average tested score",avg+"%","Across tested controls"],
-    ["Testing coverage",(summary.testing_coverage||0)+"%",(summary.tested_controls||0)+" of "+(summary.controls||rows.length)+" controls"],
-    ["Automation coverage",(summary.automation_coverage||0)+"%",(summary.automated_controls||0)+" controls mapped to evidence rules"],
-    ["High findings",summary.high_findings||0,"High-severity exceptions still open"]
-  ].map(x=>'<div class="metric"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
-  const fw=state.frameworkCoverage||[],max=Math.max(1,...fw.map(x=>Number(x.controls||0)));
-  $("#frameworkCoverage").innerHTML=fw.length?fw.map(x=>'<div class="bar-row"><span>'+esc(x.framework)+'</span><div class="bar-track"><i style="width:'+(Number(x.controls)/max*100)+'%"></i></div><b>'+esc(x.controls)+'</b></div>').join(""):'<div class="empty-state">No framework mappings available.</div>';
-  $("#evidenceFreshness").innerHTML='<div class="mini-stats"><div><small>Fresh</small><strong>'+esc(freshness.fresh||0)+'</strong></div><div><small>Expiring soon</small><strong>'+esc(freshness.expiring_soon||0)+'</strong></div><div><small>Expired</small><strong>'+esc(freshness.expired||0)+'</strong></div></div><p style="font-size:10px;color:var(--muted)">Automated evidence items: <b>'+esc(freshness.automated||0)+'</b> of '+esc(freshness.total||0)+'. Evidence approaching expiry is surfaced before an audit request becomes urgent.</p>';
-  $("#reportBody").innerHTML=rows.length?rows.map(r=>{const score=Number(r.score||0);const cls=score>=85?"good":score>=70?"warn":score>0?"bad":"";return '<tr><td class="control-name"><b>'+esc(r.control_code)+' · '+esc(r.title)+'</b><span>'+esc(r.owner||"Unassigned")+'</span></td><td>'+esc(r.category)+'</td><td>'+tag(r.risk_level)+'</td><td><span class="score-ring '+cls+'">'+(score?score:"—")+'</span></td><td>'+tag(r.latest_result)+'</td><td>'+esc(r.current_evidence)+'</td><td>'+esc(r.open_findings)+'</td><td>'+fmtDate(r.next_due)+'</td></tr>'}).join(""):'<tr><td colspan="8" class="empty-state">No control health data available.</td></tr>';
-}
-function openIntegration(id){
-  const i=state.integrations.find(x=>x.id===id);if(!i)return;
-  const caps=Array.isArray(i.capabilities)?i.capabilities:[];
-  modal('<span class="eyebrow">INTEGRATION SETUP</span><h2>'+esc(i.name)+'</h2><p>This connector is designed for '+esc(i.category)+' evidence. Saving this form marks the connector as configured, not connected. A source is only shown as Connected after provider credentials and a live validation are completed.</p><div class="capabilities">'+caps.map(x=>'<span>'+esc(x)+'</span>').join("")+'</div><form class="form" id="integrationForm"><label>Authentication model<input value="'+esc(i.auth_type)+'" disabled></label><label>Tenant / account reference<input name="tenant_ref" value="'+esc(i.tenant_ref||"")+'" placeholder="Tenant, account or instance identifier"></label><label>Base URL (where applicable)<input name="base_url" value="'+esc(i.base_url||"")+'" placeholder="https://..."></label><div class="form-actions"><button type="button" class="btn secondary" data-close-modal>Cancel</button><button class="btn primary">Save configuration</button></div></form>');
-  $("#integrationForm").onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());try{await api("/api/integrations/"+id,{method:"PUT",body:JSON.stringify({...d,status:"Configured"})});closeModal();toast("Integration configuration saved");await refresh(["integrations","automation","audit"])}catch(err){toast(err.message)}};
-  $("[data-close-modal]").forEach(b=>b.onclick=closeModal);
+function renderAssessments(){
+  $("#assessmentsBody").innerHTML=state.assessments.length?state.assessments.map(a=>'<tr><td class="control-name"><b>'+esc(a.control_code)+" · "+esc(a.control_title)+'</b></td><td>'+esc(a.period)+'</td><td>'+tag(a.result)+'</td><td><b>'+esc(a.score??"—")+(a.score!=null?"%":"")+'</b></td><td>'+esc(a.tester_name||"—")+'</td><td>'+tag(a.review_status)+'</td><td>'+fmtDate(a.tested_at)+'</td></tr>').join(""):'<tr><td colspan="7" class="empty-state">No control tests recorded.</td></tr>';
 }
 function renderFindings(){
-  const columns=[["Open",x=>x.status==="Open"],["In Progress",x=>["In Progress","Remediation"].includes(x.status)],["Closed",x=>["Closed","Resolved"].includes(x.status)]];
-  $("#findingBoard").innerHTML=columns.map(([name,test])=>{const items=state.findings.filter(test);return '<section class="finding-column"><div class="finding-column-head"><b>'+name+'</b><span>'+items.length+'</span></div>'+items.map(f=>'<article class="finding-card"><div>'+tag(f.severity)+'</div><h3>'+esc(f.title)+'</h3><p>'+esc(f.control_code||"No linked control")+(f.description?" · "+esc(f.description):"")+'</p><div class="finding-card-foot"><span>'+esc(f.owner||"Unassigned")+' · '+fmtDate(f.due_date)+'</span>'+(has("findings.write")?'<select data-finding-status="'+f.id+'"><option '+(f.status==="Open"?"selected":"")+'>Open</option><option '+(["In Progress","Remediation"].includes(f.status)?"selected":"")+'>In Progress</option><option '+(["Closed","Resolved"].includes(f.status)?"selected":"")+'>Resolved</option></select>':tag(f.status))+"</div></article>").join("")+'</section>'}).join("");
+  const cols=[["Open",x=>x.status==="Open"],["In Progress",x=>["In Progress","Remediation"].includes(x.status)],["Closed",x=>["Closed","Resolved"].includes(x.status)]];
+  $("#findingBoard").innerHTML=cols.map(([name,test])=>{const items=state.findings.filter(test);return '<section class="finding-column"><div class="finding-column-head"><b>'+name+'</b><span>'+items.length+'</span></div>'+items.map(f=>'<article class="finding-card"><div>'+tag(f.severity)+'</div><h3>'+esc(f.title)+'</h3><p>'+esc(f.control_code||"No linked control")+(f.description?" · "+esc(f.description):"")+'</p><div class="finding-card-foot"><span>'+esc(f.owner||"Unassigned")+' · '+fmtDate(f.due_date)+'</span>'+(has("findings.write")?'<select data-finding-status="'+f.id+'"><option '+(f.status==="Open"?"selected":"")+'>Open</option><option '+(["In Progress","Remediation"].includes(f.status)?"selected":"")+'>In Progress</option><option '+(["Closed","Resolved"].includes(f.status)?"selected":"")+'>Resolved</option></select>':tag(f.status))+'</div></article>').join("")+'</section>'}).join("");
   $$("[data-finding-status]").forEach(s=>s.onchange=()=>updateFinding(Number(s.dataset.findingStatus),s.value));
 }
-async function updateFinding(id,status){try{await api("/api/findings/"+id,{method:"PUT",body:JSON.stringify({status})});toast("Finding updated");await refresh(["findings","dashboard","audit"])}catch(e){toast(e.message)}}
+async function updateFinding(id,status){
+  try{await api("/api/findings/"+id,{method:"PUT",body:JSON.stringify({status})});toast("Issue updated");await refresh(["findings","dashboard","audit"])}
+  catch(e){toast(e.message);renderFindings()}
+}
+function renderIntegrations(){
+  const gh=state.integrations.find(i=>i.provider_key==="github");
+  if(gh){
+    $("#githubConnectionState").innerHTML='<div class="connection-state">Status: <strong>'+esc(gh.status)+'</strong>'+(gh.tenant_ref?' · Account: <strong>'+esc(gh.tenant_ref)+'</strong>':'')+(gh.last_sync_at?' · Last sync: '+fmtTime(gh.last_sync_at):'')+'</div>';
+    $("#githubActions").innerHTML=gh.status==="Connected"
+      ?'<button class="btn outline" id="manageGithubBtn">Repositories</button><button class="btn outline" id="syncGithubBtn">Sync now</button><button class="btn outline" id="disconnectGithubBtn">Disconnect</button>'
+      :'<button class="btn outline" id="connectGithubBtn">Connect GitHub</button>';
+    $("#connectGithubBtn")?.addEventListener("click",connectGithub);
+    $("#manageGithubBtn")?.addEventListener("click",manageGithubRepos);
+    $("#syncGithubBtn")?.addEventListener("click",syncGithub);
+    $("#disconnectGithubBtn")?.addEventListener("click",disconnectGithub);
+  }
+  const connected=state.integrations.filter(i=>i.status==="Connected").length,configured=state.integrations.filter(i=>i.status==="Configured").length;
+  $("#integrationSummary").innerHTML=[
+    ["Connector catalogue",state.integrations.length,"available source types"],
+    ["Live connections",connected,"validated providers"],
+    ["Configured",configured,"setup started"],
+    ["Evidence automation",state.integrations.filter(i=>Number(i.automation_count)>0).length,"providers mapped to rules"]
+  ].map(x=>'<div class="metric"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
+  const q=$("#integrationSearch")?.value?.toLowerCase()||"",cat=$("#integrationCategory")?.value||"",status=$("#integrationStatus")?.value||"";
+  const rows=state.integrations.filter(i=>(!q||(i.name+" "+i.category+" "+(i.capabilities||[]).join(" ")).toLowerCase().includes(q))&&(!cat||i.category===cat)&&(!status||i.status===status));
+  $("#integrationGrid").innerHTML=rows.map(i=>'<article class="integration-card"><div class="integration-card-head"><span class="integration-logo">'+initials(i.name)+'</span>'+tag(i.status)+'</div><h3>'+esc(i.name)+'</h3><p>'+esc(i.category)+' · '+esc(i.auth_type)+'</p><div class="capabilities">'+(Array.isArray(i.capabilities)?i.capabilities:[]).slice(0,6).map(x=>'<span>'+esc(x)+'</span>').join("")+'</div><div class="integration-foot"><span>'+esc(i.automation_count||0)+' mapped rule(s)</span><button '+(i.provider_key==="github"?'data-github-shortcut':'data-provider-info="'+esc(i.name)+'"')+'>'+(i.provider_key==="github"?(i.status==="Connected"?"Manage":"Connect"):"Connector details")+'</button></div></article>').join("");
+  $$("[data-github-shortcut]").forEach(b=>b.onclick=()=>gh?.status==="Connected"?manageGithubRepos():connectGithub());
+  $$("[data-provider-info]").forEach(b=>b.onclick=()=>modal('<span class="caps">CONNECTOR ROADMAP</span><h2>'+esc(b.dataset.providerInfo)+'</h2><p>This provider is in the integration catalogue, but only connectors that complete credential validation and live evidence collection are marked Connected. GitHub is the first live commercial connector in this rollout.</p><div class="manual-tip">The platform will not fake connection status or automated evidence for a provider that has not passed a live connector validation.</div><div class="form-actions"><button class="btn dark" data-close-modal>Close</button></div>'));
+}
+function renderLibrary(){
+  const groups={};state.controls.forEach(c=>(groups[c.category]??=[]).push(c));
+  $("#libraryGrid").innerHTML=Object.entries(groups).sort((a,b)=>a[0].localeCompare(b[0])).map(([cat,items])=>'<article class="library-card"><span class="caps">CONTROL AREA</span><h3>'+esc(cat)+'</h3><strong>'+items.length+'</strong><p>active controls</p><div class="library-list">'+items.slice(0,5).map(c=>'<button data-lib-control="'+c.id+'">'+esc(c.control_code)+' · '+esc(c.title)+'</button>').join("")+(items.length>5?'<button data-page-link="controls">+'+(items.length-5)+' more controls</button>':'')+'</div></article>').join("");
+  $$("[data-lib-control]").forEach(b=>b.onclick=()=>openControl(Number(b.dataset.libControl)));
+  bindPageLinks();
+}
 function renderAudit(){
-  $("#auditBody").innerHTML=state.audit.length?state.audit.map(a=>'<tr><td>'+fmtTime(a.created_at)+'</td><td class="control-name"><b>'+esc(a.user_name||"System")+'</b><span>'+esc(a.email||"")+'</span></td><td><b>'+esc(a.action)+'</b></td><td>'+esc(a.entity_type)+'</td><td>'+esc(a.entity_id??"—")+'</td><td>'+esc(JSON.stringify(a.details||{}).slice(0,90))+"</td></tr>").join(""):'<tr><td colspan="6" class="empty-state">No audit activity available.</td></tr>';
+  $("#auditBody").innerHTML=state.audit.length?state.audit.map(a=>'<tr><td>'+fmtTime(a.created_at)+'</td><td class="control-name"><b>'+esc(a.user_name||"System")+'</b><span>'+esc(a.email||"")+'</span></td><td><b>'+esc(a.action)+'</b></td><td>'+esc(a.entity_type)+'</td><td>'+esc(a.entity_id??"—")+'</td><td>'+esc(JSON.stringify(a.details||{}).slice(0,120))+'</td></tr>').join(""):'<tr><td colspan="6" class="empty-state">No audit activity available.</td></tr>';
 }
 function renderUsers(){
-  $("#usersBody").innerHTML=state.users.length?state.users.map(u=>'<tr><td class="control-name"><b>'+esc(u.name)+'</b></td><td>'+esc(u.email)+'</td><td>'+tag(humanRole(u.role))+'</td><td>'+tag(u.status)+'</td><td>'+fmtDate(u.created_at)+"</td></tr>").join(""):'<tr><td colspan="5" class="empty-state">No users available.</td></tr>';
+  $("#usersBody").innerHTML=state.users.length?state.users.map(u=>'<tr><td class="control-name"><b>'+esc(u.name)+'</b></td><td>'+esc(u.email)+'</td><td>'+tag(humanRole(u.role))+'</td><td>'+tag(u.status)+'</td><td>'+fmtDate(u.created_at)+'</td></tr>').join(""):'<tr><td colspan="5" class="empty-state">No users available.</td></tr>';
 }
 function populateFilters(){
-  const cats=[...new Set(state.controls.map(c=>c.category))].sort(); if($("#categoryFilter")){$("#categoryFilter").innerHTML='<option value="">All categories</option>'+cats.map(c=>'<option>'+esc(c)+'</option>').join("")}
+  const cats=[...new Set(state.controls.map(c=>c.category))].sort();
+  if($("#categoryFilter")){const old=$("#categoryFilter").value;$("#categoryFilter").innerHTML='<option value="">All control areas</option>'+cats.map(c=>'<option>'+esc(c)+'</option>').join("");$("#categoryFilter").value=old}
+  if($("#integrationCategory")){const cats2=[...new Set(state.integrations.map(i=>i.category))].sort(),old=$("#integrationCategory").value;$("#integrationCategory").innerHTML='<option value="">All categories</option>'+cats2.map(c=>'<option>'+esc(c)+'</option>').join("");$("#integrationCategory").value=old}
 }
-async function refresh(parts){
-  const map={dashboard:["dashboard","/api/dashboard"],controls:["controls","/api/controls"],assessments:["assessments","/api/assessments"],evidence:["evidence","/api/evidence"],findings:["findings","/api/findings"],integrations:["integrations","/api/integrations"],automation:["automation","/api/automation"],report:["report","/api/reports/control-health"],frameworkCoverage:["frameworkCoverage","/api/reports/framework-coverage"],evidenceFreshness:["evidenceFreshness","/api/reports/evidence-freshness"],assuranceSummary:["assuranceSummary","/api/reports/assurance-summary"],audit:["audit","/api/audit"],users:["users","/api/users"]};
-  for(const p of parts){if(map[p])state[map[p][0]]=await api(map[p][1])}renderAll();
+async function openControl(id){
+  try{
+    const d=await api("/api/controls/"+id);state.currentControl=d;
+    const c=d.control;
+    $("#controlDetail").innerHTML='<div class="control-detail-head"><div><span class="caps">CONTROL RECORD</span><h1>'+esc(c.control_code)+' · '+esc(c.title)+'</h1><p>'+esc(c.description)+'</p></div><div class="toolbar-actions"><button class="btn outline" data-back-register>Back</button><button class="btn dark" data-detail-test="'+c.id+'">Test control</button></div></div>'+
+    '<div class="detail-grid"><div class="detail-card"><small>CONTROL AREA</small><b>'+esc(c.category)+'</b></div><div class="detail-card"><small>OWNER</small><b>'+esc(c.owner||"Unassigned")+'</b></div><div class="detail-card"><small>FREQUENCY</small><b>'+esc(c.frequency)+'</b></div><div class="detail-card"><small>RISK</small><b>'+tag(c.risk_level)+'</b></div><div class="detail-card"><small>FRAMEWORK</small><b>'+esc(c.framework_ref||"—")+'</b></div><div class="detail-card"><small>EVIDENCE EXPECTATION</small><b>'+esc(c.evidence_required||"—")+'</b></div></div>'+
+    '<section class="detail-section panel"><div class="panel-head"><div><span class="caps">EVIDENCE</span><h3>Evidence attached to this control</h3></div></div>'+(d.evidence.length?d.evidence.map(e=>'<div class="activity-item"><span>▣</span><div><b>'+esc(e.title)+'</b><small>'+esc(e.source)+' · '+tag(e.review_status)+'</small></div><time>'+fmtDate(e.created_at)+'</time></div>').join(""):'<div class="empty-state">No evidence yet.</div>')+'</section>'+
+    '<section class="detail-section panel"><div class="panel-head"><div><span class="caps">TEST HISTORY</span><h3>Recorded control tests</h3></div></div>'+(d.tests.length?d.tests.map(t=>'<div class="activity-item"><span>✓</span><div><b>'+esc(t.period)+' · '+esc(t.result)+'</b><small>'+esc(t.tester_name||"—")+' · Score '+esc(t.score??"—")+'%</small></div><time>'+fmtDate(t.tested_at)+'</time></div>').join(""):'<div class="empty-state">This control has not been tested.</div>')+'</section>'+
+    '<section class="detail-section panel"><div class="panel-head"><div><span class="caps">ISSUES</span><h3>Findings and remediation</h3></div></div>'+(d.findings.length?d.findings.map(x=>'<div class="activity-item"><span>!</span><div><b>'+esc(x.title)+'</b><small>'+esc(x.owner||"Unassigned")+' · '+esc(x.status)+'</small></div><time>'+fmtDate(x.due_date)+'</time></div>').join(""):'<div class="empty-state">No findings linked to this control.</div>')+'</section>';
+    go("controlDetail");$("[data-back-register]").onclick=()=>go("controls");$("[data-detail-test]").onclick=()=>openTestControl(id);
+  }catch(e){toast(e.message)}
 }
-function modal(html){$("#modalBody").innerHTML=html;$("#modal").classList.remove("hidden")}
-function closeModal(){$("#modal").classList.add("hidden");$("#modalBody").innerHTML=""}
-function controlOptions(){return state.controls.map(c=>'<option value="'+c.id+'">'+esc(c.control_code+" · "+c.title)+'</option>').join("")}
-function integrationOptions(){return state.integrations.map(i=>'<option value="'+i.id+'">'+esc(i.name+" · "+i.category)+'</option>').join("")}
-function openForm(type){
-  const forms={
-    control:`<span class="eyebrow">CONTROL LIBRARY</span><h2>Create a new control</h2><p>Add a control with clear ownership, frequency, risk and evidence expectations.</p><form class="form" id="entityForm" data-kind="control"><div class="form-grid"><label>Control code<input name="control_code" required placeholder="ITGC-013"></label><label>Risk level<select name="risk_level"><option>High</option><option selected>Medium</option><option>Low</option></select></label></div><label>Control title<input name="title" required></label><label>Description<textarea name="description"></textarea></label><div class="form-grid"><label>Category<input name="category" required placeholder="Access Management"></label><label>Framework reference<input name="framework_ref" placeholder="ISO 27001 / COBIT"></label><label>Control owner<input name="owner"></label><label>Frequency<select name="frequency"><option>Continuous</option><option>Daily</option><option>Monthly</option><option selected>Quarterly</option><option>Semi-Annual</option><option>Annual</option></select></label></div><label>Required evidence<textarea name="evidence_required"></textarea></label><div class="form-actions"><button type="button" class="btn secondary" data-close-modal>Cancel</button><button class="btn primary">Create control</button></div></form>`,
-    assessment:`<span class="eyebrow">CONTROL TESTING</span><h2>Record an assessment</h2><p>Document the latest operating-effectiveness test for a control.</p><form class="form" id="entityForm" data-kind="assessment"><label>Control<select name="control_id" required><option value="">Select control</option>${controlOptions()}</select></label><div class="form-grid"><label>Assessment period<input name="period" required placeholder="Q3 2026"></label><label>Result<select name="result"><option>Effective</option><option>Partially Effective</option><option>Ineffective</option><option>Not Tested</option></select></label></div><label>Score (0-100)<input type="number" name="score" min="0" max="100"></label><label>Test notes<textarea name="notes"></textarea></label><div class="form-actions"><button type="button" class="btn secondary" data-close-modal>Cancel</button><button class="btn primary">Save assessment</button></div></form>`,
-    evidence:`<span class="eyebrow">EVIDENCE REGISTER</span><h2>Add control evidence</h2><p>Register evidence with a source and period so it stays traceable.</p><form class="form" id="entityForm" data-kind="evidence"><label>Control<select name="control_id" required><option value="">Select control</option>${controlOptions()}</select></label><label>Evidence title<input name="title" required placeholder="Q3 privileged users export"></label><div class="form-grid"><label>Evidence type<select name="evidence_type"><option>Document</option><option>System Report</option><option>Screenshot</option><option>Approval</option><option>Log Extract</option></select></label><label>Source<select name="source"><option>Manual Upload</option><option>Microsoft 365</option><option>Entra ID</option><option>SIEM</option><option>Database</option><option>ServiceNow / Jira</option></select></label><label>Period<input name="period" placeholder="Q3 2026"></label><label>Status<select name="status"><option>Current</option><option>Expired</option><option>Superseded</option></select></label></div><label>Evidence URL / repository link<input name="url" placeholder="https://..."></label><div class="form-actions"><button type="button" class="btn secondary" data-close-modal>Cancel</button><button class="btn primary">Add evidence</button></div></form>`,
-    finding:`<span class="eyebrow">ISSUES & REMEDIATION</span><h2>Create a finding</h2><p>Capture a control gap and assign clear remediation responsibility.</p><form class="form" id="entityForm" data-kind="finding"><label>Linked control<select name="control_id"><option value="">No linked control</option>${controlOptions()}</select></label><label>Finding title<input name="title" required></label><label>Description<textarea name="description"></textarea></label><div class="form-grid"><label>Severity<select name="severity"><option>High</option><option selected>Medium</option><option>Low</option></select></label><label>Owner<input name="owner"></label><label>Due date<input type="date" name="due_date"></label><label>Status<select name="status"><option>Open</option><option>In Progress</option></select></label></div><div class="form-actions"><button type="button" class="btn secondary" data-close-modal>Cancel</button><button class="btn primary">Create finding</button></div></form>`,
-    automation:`<span class="eyebrow">CONTINUOUS ASSURANCE</span><h2>Create an evidence automation rule</h2><p>Map a control to a source system. Live collection remains disabled until the source is genuinely connected and validated.</p><form class="form" id="entityForm" data-kind="automation"><label>Control<select name="control_id" required><option value="">Select control</option>${controlOptions()}</select></label><label>Source integration<select name="integration_id" required><option value="">Select integration</option>${integrationOptions()}</select></label><label>Rule name<input name="name" required placeholder="Collect privileged role assignments"></label><div class="form-grid"><label>Schedule<select name="schedule"><option>Daily</option><option>Weekly</option><option>Monthly</option><option>Quarterly</option></select></label><label>Evidence type<select name="evidence_type"><option>System Report</option><option>Log Extract</option><option>Configuration Snapshot</option><option>Access Listing</option></select></label></div><div class="form-actions"><button type="button" class="btn secondary" data-close-modal>Cancel</button><button class="btn primary">Create rule</button></div></form>`,
-    user:`<span class="eyebrow">ACCESS MANAGEMENT</span><h2>Add a platform user</h2><p>Create an account using a defined least-privilege role.</p><form class="form" id="entityForm" data-kind="user"><label>Full name<input name="name" required></label><label>Email<input type="email" name="email" required></label><label>Temporary password<input type="password" name="password" minlength="8" required></label><label>Role<select name="role"><option value="control_manager">Control Manager</option><option value="auditor">Auditor</option><option value="reviewer">Reviewer</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label><div class="form-actions"><button type="button" class="btn secondary" data-close-modal>Cancel</button><button class="btn primary">Create user</button></div></form>`
-  };
-  modal(forms[type]);$("#entityForm").onsubmit=submitForm;$$("[data-close-modal]").forEach(b=>b.onclick=closeModal);
+async function openTestControl(id){
+  try{
+    const d=await api("/api/controls/"+id),c=d.control;
+    const ev=d.evidence||[];
+    modal('<span class="caps">TEST CONTROL</span><h2>'+esc(c.control_code)+' · '+esc(c.title)+'</h2><p>Review available evidence, document the procedure performed, record the test result and raise a finding if an exception requires remediation.</p><form class="form" id="testControlForm"><div class="form-grid"><label>Testing period<input name="period" required placeholder="Q3 2026"></label><label>Score (0-100)<input name="score" type="number" min="0" max="100" required></label></div><label>Test objective<textarea name="test_objective" required placeholder="What are you testing and why?"></textarea></label><label>Test procedure<textarea name="test_procedure" required placeholder="Describe the sample and steps performed."></textarea></label><div class="form-grid"><label>Sample size<input name="sample_size" type="number" min="0"></label><label>Exceptions found<input name="exception_count" type="number" min="0" value="0"></label></div><label>Evidence used</label><div class="check-grid">'+(ev.length?ev.map(e=>'<label class="check-row"><input type="checkbox" name="evidence_ids" value="'+e.id+'"><span><b>'+esc(e.title)+'</b><br>'+esc(e.source)+' · '+esc(e.review_status)+'</span></label>').join(""):'<div class="manual-tip">No evidence is attached to this control yet. You can still document the test, but add evidence before review.</div>')+'</div><div class="form-grid"><label>Design effectiveness<select name="design_effective"><option value="">Not assessed</option><option value="true">Effective</option><option value="false">Ineffective</option></select></label><label>Operating effectiveness<select name="operating_effective"><option value="">Not assessed</option><option value="true">Effective</option><option value="false">Ineffective</option></select></label></div><label>Overall result<select name="result"><option>Effective</option><option>Partially Effective</option><option>Ineffective</option></select></label><label>Tester notes<textarea name="notes" placeholder="Document observations, exceptions and conclusion."></textarea></label><label class="check-row"><input type="checkbox" id="raiseFinding" name="raise_finding"><span><b>Raise a finding from this test</b><br>Create a remediation issue when the result is not Effective.</span></label><div id="findingFields" class="hidden"><label>Finding title<input name="finding_title"></label><label>Finding severity<select name="finding_severity"><option>High</option><option selected>Medium</option><option>Low</option></select></label></div><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Save control test</button></div></form>',true);
+    $("#raiseFinding").onchange=e=>$("#findingFields").classList.toggle("hidden",!e.target.checked);
+    $("#testControlForm").onsubmit=async e=>{
+      e.preventDefault();const fd=new FormData(e.target),ids=fd.getAll("evidence_ids").map(Number);
+      const bool=v=>v===""?null:v==="true";
+      const payload={period:fd.get("period"),score:Number(fd.get("score")),test_objective:fd.get("test_objective"),test_procedure:fd.get("test_procedure"),sample_size:fd.get("sample_size")===""?null:Number(fd.get("sample_size")),exception_count:Number(fd.get("exception_count")||0),evidence_ids:ids,design_effective:bool(fd.get("design_effective")),operating_effective:bool(fd.get("operating_effective")),result:fd.get("result"),notes:fd.get("notes")||"",raise_finding:fd.get("raise_finding")==="on",finding_title:fd.get("finding_title")||undefined,finding_severity:fd.get("finding_severity")||undefined};
+      try{await api("/api/controls/"+id+"/test",{method:"POST",body:JSON.stringify(payload)});closeModal();toast("Control test recorded");await refresh(["controls","assessments","findings","dashboard","audit"]);if(state.page==="controlDetail")openControl(id)}catch(err){toast(err.message)}
+    };
+  }catch(e){toast(e.message)}
 }
-async function submitForm(e){
-  e.preventDefault();const form=e.target,kind=form.dataset.kind,data=Object.fromEntries(new FormData(form).entries());
-  if(["assessment","evidence","finding","automation"].includes(kind)&&data.control_id)data.control_id=Number(data.control_id);
-  if(kind==="automation"&&data.integration_id)data.integration_id=Number(data.integration_id);
-  if(kind==="assessment"&&data.score!=="")data.score=Number(data.score); if(kind==="assessment"&&data.score==="")delete data.score;
-  if(kind==="finding"&&!data.control_id)data.control_id=null;if(kind==="finding"&&!data.due_date)data.due_date=null;
-  const endpoints={control:["/api/controls",["controls","report","dashboard","audit"]],assessment:["/api/assessments",["assessments","controls","report","dashboard","audit"]],evidence:["/api/evidence",["evidence","controls","report","dashboard","audit"]],finding:["/api/findings",["findings","controls","report","dashboard","audit"]],automation:["/api/automation",["automation","integrations","audit"]],user:["/api/users",["users","audit"]]};
-  try{await api(endpoints[kind][0],{method:"POST",body:JSON.stringify(data)});closeModal();toast(kind.charAt(0).toUpperCase()+kind.slice(1)+" saved");await refresh(endpoints[kind][1])}catch(err){toast(err.message)}
+function startGenericTest(){
+  modal('<span class="caps">TEST CONTROL</span><h2>Select the control to test</h2><p>Choose an active control. The next step will load its evidence and testing record.</p><form class="form" id="selectTestForm"><label>Control<select name="control_id" required><option value="">Select control</option>'+state.controls.map(c=>'<option value="'+c.id+'">'+esc(c.control_code+" · "+c.title)+'</option>').join("")+'</select></label><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Continue</button></div></form>');
+  $("#selectTestForm").onsubmit=e=>{e.preventDefault();const id=Number(new FormData(e.target).get("control_id"));closeModal();openTestControl(id)};
 }
+function openUploadEvidence(){
+  modal('<span class="caps">EVIDENCE VAULT</span><h2>Upload source evidence</h2><p>The file is stored in the private workspace and receives a SHA-256 fingerprint at upload.</p><form class="form" id="uploadEvidenceForm"><label>Control<select name="control_id" required><option value="">Select control</option>'+state.controls.map(c=>'<option value="'+c.id+'">'+esc(c.control_code+" · "+c.title)+'</option>').join("")+'</select></label><label>Evidence title<input name="title" required></label><div class="form-grid"><label>Period<input name="period" placeholder="Q3 2026"></label><label>Evidence type<select name="evidence_type"><option>Document</option><option>System Report</option><option>Screenshot</option><option>Approval</option><option>Log Extract</option></select></label></div><label>Source file<input name="file" type="file" required></label><div class="manual-tip">Maximum file size: 8 MB. The original file is preserved with its SHA-256 integrity fingerprint.</div><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Upload evidence</button></div></form>');
+  $("#uploadEvidenceForm").onsubmit=async e=>{e.preventDefault();const fd=new FormData(e.target);try{await api("/api/evidence/upload",{method:"POST",body:fd});closeModal();toast("Evidence uploaded and fingerprinted");await refresh(["evidence","controls","dashboard","audit"])}catch(err){toast(err.message)}};
+}
+function openLinkEvidence(){
+  modal('<span class="caps">EVIDENCE VAULT</span><h2>Register an evidence source</h2><p>Use this for an approved external repository or evidence link. For local source files, use Upload file.</p><form class="form" id="linkEvidenceForm"><label>Control<select name="control_id" required><option value="">Select control</option>'+state.controls.map(c=>'<option value="'+c.id+'">'+esc(c.control_code+" · "+c.title)+'</option>').join("")+'</select></label><label>Evidence title<input name="title" required></label><div class="form-grid"><label>Type<select name="evidence_type"><option>Document</option><option>System Report</option><option>Approval</option><option>Log Extract</option></select></label><label>Period<input name="period" placeholder="Q3 2026"></label></div><label>Source name<input name="source" placeholder="SharePoint / ServiceNow / Internal repository"></label><label>Evidence URL<input name="url" type="url" required placeholder="https://..."></label><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Register evidence</button></div></form>');
+  $("#linkEvidenceForm").onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());d.control_id=Number(d.control_id);try{await api("/api/evidence",{method:"POST",body:JSON.stringify(d)});closeModal();toast("Evidence source registered");await refresh(["evidence","controls","dashboard","audit"])}catch(err){toast(err.message)}};
+}
+async function downloadEvidence(id){
+  try{const r=await fetch("/api/evidence/files/"+id,{headers:{Authorization:"Bearer "+state.token}});if(!r.ok)throw new Error("Unable to download evidence");const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="evidence";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url)}catch(e){toast(e.message)}
+}
+function reviewEvidence(id){
+  const e=state.evidence.find(x=>x.id===id);modal('<span class="caps">EVIDENCE REVIEW</span><h2>'+esc(e?.title||"Review evidence")+'</h2><form class="form" id="reviewEvidenceForm"><label>Decision<select name="review_status"><option>Approved</option><option>Needs Update</option><option>Rejected</option></select></label><label>Review notes<textarea name="review_notes" placeholder="Explain the review conclusion."></textarea></label><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Record review</button></div></form>');
+  $("#reviewEvidenceForm").onsubmit=async ev=>{ev.preventDefault();const d=Object.fromEntries(new FormData(ev.target).entries());try{await api("/api/evidence/"+id+"/review",{method:"POST",body:JSON.stringify(d)});closeModal();toast("Evidence review recorded");await refresh(["evidence","audit"])}catch(err){toast(err.message)}};
+}
+async function connectGithub(){
+  modal('<span class="caps">GITHUB · LIVE CONNECTOR</span><h2>Connect GitHub</h2><p>Use a GitHub fine-grained personal access token or classic token with read access to the repositories you want to assess. The token is encrypted before it is stored.</p><form class="form" id="githubConnectForm"><label>GitHub token<input name="token" type="password" required autocomplete="off" placeholder="github_pat_..."></label><div class="manual-tip"><b>Recommended permissions:</b> repository metadata/read, contents/read, pull requests/read, actions/read, and security-event read permissions where your plan and repository permit them.</div><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Validate & connect</button></div></form>');
+  $("#githubConnectForm").onsubmit=async e=>{e.preventDefault();const token=new FormData(e.target).get("token");try{await api("/api/integrations/github/connect",{method:"POST",body:JSON.stringify({token,repositories:[]})});closeModal();toast("GitHub connected");await refresh(["integrations","audit"]);await manageGithubRepos()}catch(err){toast(err.message)}};
+}
+async function manageGithubRepos(){
+  try{
+    const d=await api("/api/integrations/github/repositories");const selected=new Set(d.selected||[]);
+    modal('<span class="caps">GITHUB REPOSITORIES</span><h2>Select repositories for control evidence</h2><p>Only selected repositories will be included in routine evidence collection. If none are selected, a sync scans up to 20 recent non-archived repositories.</p><form class="form" id="githubReposForm"><div class="check-grid">'+d.repositories.map(r=>'<label class="check-row"><input type="checkbox" name="repositories" value="'+esc(r.full_name)+'" '+(selected.has(r.full_name)?"checked":"")+'><span><b>'+esc(r.full_name)+'</b><br>'+(r.private?"Private":"Public")+' · default '+esc(r.default_branch)+'</span></label>').join("")+'</div><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Save selection</button></div></form>',true);
+    $("#githubReposForm").onsubmit=async e=>{e.preventDefault();const repos=new FormData(e.target).getAll("repositories");try{await api("/api/integrations/github/config",{method:"PUT",body:JSON.stringify({repositories:repos})});closeModal();toast("GitHub repository selection saved");await refresh(["integrations","audit"])}catch(err){toast(err.message)}};
+  }catch(e){toast(e.message)}
+}
+async function syncGithub(){
+  const ok=confirm("Collect fresh GitHub control evidence from the selected repositories now?");if(!ok)return;
+  try{toast("GitHub sync started");const d=await api("/api/integrations/github/sync",{method:"POST",body:"{}"});toast("GitHub sync complete: "+d.evidenceCreated+" evidence item(s), "+d.findingsCreated+" finding(s)");await refresh(["integrations","evidence","findings","controls","dashboard","audit"])}catch(e){toast(e.message)}
+}
+async function disconnectGithub(){
+  if(!confirm("Disconnect GitHub? Existing evidence remains in the vault."))return;
+  try{await api("/api/integrations/github/connection",{method:"DELETE"});toast("GitHub disconnected");await refresh(["integrations","audit"])}catch(e){toast(e.message)}
+}
+function createControlForm(){
+  modal('<span class="caps">CONTROL REGISTER</span><h2>Create control</h2><form class="form" id="controlForm"><div class="form-grid"><label>Control code<input name="control_code" required placeholder="ITGC-013"></label><label>Risk<select name="risk_level"><option>High</option><option selected>Medium</option><option>Low</option></select></label></div><label>Title<input name="title" required></label><label>Description<textarea name="description"></textarea></label><div class="form-grid"><label>Area<input name="category" required></label><label>Framework mapping<input name="framework_ref"></label><label>Owner<input name="owner"></label><label>Frequency<select name="frequency"><option>Continuous</option><option>Daily</option><option>Weekly</option><option>Monthly</option><option selected>Quarterly</option><option>Semi-Annual</option><option>Annual</option></select></label></div><label>Required evidence<textarea name="evidence_required"></textarea></label><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Create control</button></div></form>');
+  $("#controlForm").onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());try{await api("/api/controls",{method:"POST",body:JSON.stringify(d)});closeModal();toast("Control created");await refresh(["controls","dashboard","audit"])}catch(err){toast(err.message)}};
+}
+function createFindingForm(){
+  modal('<span class="caps">ISSUES & REMEDIATION</span><h2>Create finding</h2><form class="form" id="findingForm"><label>Linked control<select name="control_id"><option value="">No linked control</option>'+state.controls.map(c=>'<option value="'+c.id+'">'+esc(c.control_code+" · "+c.title)+'</option>').join("")+'</select></label><label>Finding title<input name="title" required></label><label>Description<textarea name="description"></textarea></label><div class="form-grid"><label>Severity<select name="severity"><option>High</option><option selected>Medium</option><option>Low</option></select></label><label>Status<select name="status"><option>Open</option><option>In Progress</option></select></label><label>Owner<input name="owner"></label><label>Due date<input name="due_date" type="date"></label></div><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Create finding</button></div></form>');
+  $("#findingForm").onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());d.control_id=d.control_id?Number(d.control_id):null;d.due_date=d.due_date||null;try{await api("/api/findings",{method:"POST",body:JSON.stringify(d)});closeModal();toast("Finding created");await refresh(["findings","dashboard","audit"])}catch(err){toast(err.message)}};
+}
+function createUserForm(){
+  modal('<span class="caps">SETTINGS & TEAM</span><h2>Add user</h2><form class="form" id="userForm"><label>Full name<input name="name" required></label><label>Email<input name="email" type="email" required></label><label>Temporary password<input name="password" type="password" minlength="8" required></label><label>Role<select name="role"><option value="control_manager">Control Manager</option><option value="auditor">Auditor</option><option value="reviewer">Reviewer</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Create user</button></div></form>');
+  $("#userForm").onsubmit=async e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target).entries());try{await api("/api/users",{method:"POST",body:JSON.stringify(d)});closeModal();toast("User created");await refresh(["users","audit"])}catch(err){toast(err.message)}};
+}
+const manual={
+start:['Getting started','Revolt-X Control is built around one assurance chain: define the control, collect evidence, test the control, record exceptions, remediate and retest.','<h3>Recommended first-day setup</h3><ol><li>Review Settings & team and confirm who can administer, manage controls, test, review and view.</li><li>Open Control register and tailor owners, frequency, risk and evidence expectations.</li><li>Connect approved source systems under Integrations.</li><li>Upload or collect evidence into Evidence vault.</li><li>Use Testing & assurance to test controls using the evidence collected.</li></ol><div class="manual-tip">A control should not be treated as compliant merely because it exists. Its assurance status comes from evidence and a documented test.</div>'],
+controls:['Controls','The Control register is the organisation’s active set of IT controls. The Control library groups the same catalogue by area to help teams navigate it.','<h3>Working with a control</h3><ol><li>Open Control register.</li><li>Search by code or title, or filter by area and risk.</li><li>Select Open to see description, owner, evidence expectation, evidence, test history and findings.</li><li>Use Test control when evidence is ready.</li></ol><h3>Good control ownership</h3><p>Every control should have an accountable owner, a realistic test frequency and a clear statement of expected evidence.</p>'],
+evidence:['Evidence vault','The Evidence vault stores uploaded source files, approved external links and structured evidence collected from connected systems.','<h3>Upload evidence</h3><ol><li>Select Upload file.</li><li>Choose the related control and period.</li><li>Select the original source file.</li><li>The platform calculates a SHA-256 fingerprint and records the upload in the audit trail.</li><li>A reviewer can mark evidence Approved, Needs Update or Rejected with review notes.</li></ol><div class="manual-tip">Do not edit a source file after it has been approved. Upload the revised file as new evidence so the chain remains traceable.</div>'],
+testing:['Test Control','Test Control is the core operating-effectiveness workflow. It links the procedure performed to the evidence used and the conclusion reached.','<h3>How to test a control</h3><ol><li>Open Testing & assurance and choose Test control, or start from the control record.</li><li>Enter the testing period and test objective.</li><li>Document the exact procedure and sample size.</li><li>Select the evidence actually used.</li><li>Record design effectiveness, operating effectiveness, exception count, overall result and score.</li><li>If the result is not Effective, optionally create a finding directly from the test.</li></ol>'],
+issues:['Findings & retesting','Findings track control exceptions through accountable remediation.','<h3>Closure rule</h3><p>For a finding linked to a control, the system requires a passing Effective retest after the finding was raised before the finding can be closed.</p><ol><li>Assign an owner and due date.</li><li>Move the issue to In Progress while remediation is underway.</li><li>Retest the related control after remediation.</li><li>Once a passing retest exists, close the finding.</li></ol>'],
+github:['GitHub integration','The GitHub connector is the first live automated-evidence connector. It validates a GitHub token, stores it encrypted and collects control evidence from selected repositories.','<h3>Connect GitHub</h3><ol><li>Open Integrations and select Connect GitHub.</li><li>Use an approved token with read access to the repositories being assessed.</li><li>Select repositories.</li><li>Select Sync now.</li></ol><h3>Evidence collected</h3><ul><li>Repository metadata and access configuration.</li><li>Default-branch protection and recent pull-request information.</li><li>Workflow inventory.</li><li>Secret-scanning, code-scanning and Dependabot alerts where the token/repository plan permits access.</li></ul><div class="manual-tip">If default branch protection is not enabled, the sync creates a real remediation finding instead of hiding the exception.</div>'],
+audit:['Audit & reporting','The Audit trail records material activity across controls, evidence, testing, findings, integrations, users and exports.','<h3>Audit pack</h3><p>Use Download audit pack to export the control register with current testing, evidence and finding information for audit or management review.</p><p>Use the trail to establish who performed an action, when it occurred and which record was affected.</p>'],
+roles:['Roles & access','Role-based access separates administration, control management, testing, review and read-only access.','<ul><li><b>Admin:</b> full workspace administration.</li><li><b>Control Manager:</b> control, testing, evidence and issue workflows.</li><li><b>Auditor:</b> testing, evidence and audit review.</li><li><b>Reviewer:</b> oversight and remediation review.</li><li><b>Viewer:</b> read-only assurance access.</li></ul><div class="manual-tip">Use the least-privilege role that allows the person to perform their assigned work.</div>']
+};
+function renderManual(key){
+  if(!$("#manualContent"))return;const m=manual[key]||manual.start;$("#manualContent").innerHTML='<span class="caps">USER MANUAL</span><h2>'+m[0]+'</h2><p>'+m[1]+'</p>'+m[2];
+  $$("[data-manual]").forEach(b=>b.classList.toggle("active",b.dataset.manual===key));
+}
+function bindPageLinks(){$$("[data-page-link]").forEach(b=>b.onclick=()=>go(b.dataset.pageLink))}
+function bindOpenForms(){
+  $$("[data-open-form]").forEach(b=>b.onclick=()=>{const t=b.dataset.openForm;if(t==="control")createControlForm();if(t==="evidence")openLinkEvidence();if(t==="finding")createFindingForm();if(t==="user")createUserForm()});
+}
+async function downloadAuditPack(){
+  try{const r=await fetch("/api/reports/audit-pack.csv",{headers:{Authorization:"Bearer "+state.token}});if(!r.ok)throw new Error("Unable to export audit pack");const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="revolt-x-it-controls-audit-pack.csv";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);toast("Audit pack downloaded")}catch(e){toast(e.message)}
+}
+
 $("#loginForm").addEventListener("submit",login);$("#logoutBtn").onclick=logout;$("#refreshBtn").onclick=loadAll;$("#menuBtn").onclick=()=>$(".sidebar").classList.toggle("open");
-$$("[data-page]").forEach(b=>b.onclick=()=>go(b.dataset.page));$$("[data-page-link]").forEach(b=>b.onclick=()=>go(b.dataset.pageLink));
-$$("[data-open-form]").forEach(b=>b.onclick=()=>openForm(b.dataset.openForm));$$("[data-close-modal]").forEach(b=>b.onclick=closeModal);
+$$("[data-page]").forEach(b=>b.onclick=()=>go(b.dataset.page));
+bindPageLinks();bindOpenForms();bindModalClose();
 $("#modal").addEventListener("click",e=>{if(e.target.matches("[data-close-modal]"))closeModal()});
+$("#uploadEvidenceBtn").onclick=openUploadEvidence;$("#startTestBtn").onclick=startGenericTest;$("#startTestBtn2").onclick=startGenericTest;$("#auditPackBtn").onclick=downloadAuditPack;
+$$("[data-manual]").forEach(b=>b.onclick=()=>renderManual(b.dataset.manual));
 ["controlSearch","categoryFilter","riskFilter"].forEach(id=>$("#"+id)?.addEventListener(id==="controlSearch"?"input":"change",renderControls));
 ["integrationSearch","integrationCategory","integrationStatus"].forEach(id=>$("#"+id)?.addEventListener(id==="integrationSearch"?"input":"change",renderIntegrations));
 restore();
-
-async function downloadAuditPack(){
-  try{
-    const r=await fetch("/api/reports/audit-pack.csv",{headers:{Authorization:"Bearer "+state.token}});
-    if(!r.ok){let d={};try{d=await r.json()}catch{};throw new Error(d.error||"Unable to export audit pack")}
-    const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement("a");
-    a.href=url;a.download="revolt-x-it-controls-audit-pack.csv";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);toast("Audit pack exported");
-  }catch(e){toast(e.message)}
-}
-$("#auditPackBtn")?.addEventListener("click",downloadAuditPack);
