@@ -451,5 +451,6 @@ $("[data-manual]").forEach(b=>b.onclick=()=>renderManual(b.dataset.manual));
 ["controlSearch","categoryFilter","riskFilter"].forEach(id=>$("#"+id)?.addEventListener(id==="controlSearch"?"input":"change",renderControls));
 ["integrationSearch","integrationCategory","integrationStatus"].forEach(id=>$("#"+id)?.addEventListener(id==="integrationSearch"?"input":"change",renderIntegrations));
 ["librarySearch","libraryCategory","libraryRisk"].forEach(id=>$("#"+id)?.addEventListener(id==="librarySearch"?"input":"change",renderLibrary));
+["auditSearch","auditAction","auditEntity"].forEach(id=>$("#"+id)?.addEventListener(id==="auditSearch"?"input":"change",renderAudit));
+["progressPeriod","progressFrequency","progressOfficer"].forEach(id=>$("#"+id)?.addEventListener("change",loadProgress));
 restore();
-\n["auditSearch","auditAction","auditEntity"].forEach(id=>$("#"+id)?.addEventListener(id==="auditSearch"?"input":"change",renderAudit));\n
