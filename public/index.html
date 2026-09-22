@@ -53,7 +53,10 @@
         <button data-page="controls"><i>✓</i>Control Library</button>
         <button data-page="assessments"><i>◉</i>Assessments</button>
         <button data-page="evidence"><i>▣</i>Evidence</button>
+        <button data-page="integrations"><i>⌁</i>Integration Hub</button>
+        <button data-page="automation"><i>⚙</i>Evidence Automation</button>
         <button data-page="findings"><i>!</i>Findings</button>
+        <button data-page="reports"><i>◒</i>Control Health</button>
         <button data-page="audit"><i>↺</i>Audit Trail</button>
         <button data-page="users" data-permission="users.read"><i>♙</i>Users & Roles</button>
       </nav>
@@ -98,6 +101,25 @@
       <section class="page hidden" id="evidencePage">
         <div class="page-toolbar"><div><span class="eyebrow">EVIDENCE REGISTER</span><h1>Control Evidence</h1><p>Maintain traceable support for each control and assessment period.</p></div><button class="btn primary" data-open-form="evidence">+ Add evidence</button></div>
         <div class="evidence-grid" id="evidenceGrid"></div>
+      </section>
+
+      <section class="page hidden" id="integrationsPage">
+        <div class="page-toolbar"><div><span class="eyebrow">INTEGRATION HUB</span><h1>Connect Your Control Environment</h1><p>Bring identity, cloud, endpoint, SIEM, ITSM, vulnerability, backup, database and DevSecOps evidence into one control platform.</p></div></div>
+        <div class="integration-summary" id="integrationSummary"></div>
+        <div class="filters"><input id="integrationSearch" placeholder="Search integrations"><select id="integrationCategory"><option value="">All categories</option></select><select id="integrationStatus"><option value="">All statuses</option><option>Available</option><option>Configured</option><option>Connected</option><option>Paused</option></select></div>
+        <div class="integration-grid" id="integrationGrid"></div>
+      </section>
+
+      <section class="page hidden" id="automationPage">
+        <div class="page-toolbar"><div><span class="eyebrow">CONTINUOUS ASSURANCE</span><h1>Evidence Automation</h1><p>Map controls to connected systems so evidence can be collected on schedule and exceptions can be surfaced quickly.</p></div><button class="btn primary" data-open-form="automation">+ New automation</button></div>
+        <div class="automation-banner"><b>Evidence without screenshots.</b><span>Once a source is connected and validated, rules can collect structured evidence from the system of record. This build does not claim a live collection succeeded until provider credentials are configured and a connector test passes.</span></div>
+        <div class="table-card"><table><thead><tr><th>Automation</th><th>Control</th><th>Integration</th><th>Schedule</th><th>Source status</th><th>Last run</th><th>Rule status</th><th>Action</th></tr></thead><tbody id="automationBody"></tbody></table></div>
+      </section>
+
+      <section class="page hidden" id="reportsPage">
+        <div class="page-toolbar"><div><span class="eyebrow">CONTROL INTELLIGENCE</span><h1>Control Health</h1><p>Combine test results, current evidence, findings and due dates into one assurance view.</p></div></div>
+        <div class="report-summary" id="reportSummary"></div>
+        <div class="table-card"><table><thead><tr><th>Control</th><th>Domain</th><th>Risk</th><th>Score</th><th>Result</th><th>Current evidence</th><th>Open findings</th><th>Next due</th></tr></thead><tbody id="reportBody"></tbody></table></div>
       </section>
 
       <section class="page hidden" id="findingsPage">
