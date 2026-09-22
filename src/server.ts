@@ -649,12 +649,12 @@ app.get("/api/integrations/github/repositories",auth,permit("integrations.read")
     const {token}=decryptSecret(q.rows[0]); const data=await githubApi("/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",token);
     const repos=(data.body||[]).map((r:any)=>({full_name:r.full_name,name:r.name,owner:r.owner?.login,private:r.private,default_branch:r.default_branch,archived:r.archived,updated_at:r.updated_at,permissions:r.permissions}));
     res.json({repositories:repos,selected:q.rows[0].config?.repositories||[]});
-  }catch(err:any){await pool.query("UPDATE integration_connections SET last_error=$3 WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId,"github",err.message]);res.status(400).json({error:err.message});}
+  }catch(err:any){await pool.query("UPDATE integration_connections SET last_error=$2 WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId,err.message]);res.status(400).json({error:err.message});}
 });
 
 app.put("/api/integrations/github/config",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
   const s=z.object({repositories:z.array(z.string()).max(100)});const p=s.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid repository selection"});
-  const q=await pool.query("UPDATE integration_connections SET config=jsonb_set(COALESCE(config,'{}'::jsonb),'{repositories}',$3::jsonb,true) WHERE organization_id=$1 AND provider_key='github' RETURNING id",[req.user!.orgId,"github",JSON.stringify(p.data.repositories)]);
+  const q=await pool.query("UPDATE integration_connections SET config=jsonb_set(COALESCE(config,'{}'::jsonb),'{repositories}',$2::jsonb,true) WHERE organization_id=$1 AND provider_key='github' RETURNING id",[req.user!.orgId,JSON.stringify(p.data.repositories)]);
   if(!q.rowCount)return res.status(409).json({error:"GitHub is not connected"});await audit(req.user!,"CONFIGURE","integration",null,{provider:"github",repositories:p.data.repositories});res.json({repositories:p.data.repositories});
 });
 
@@ -701,7 +701,7 @@ app.post("/api/integrations/github/sync",auth,permit("integrations.write"),async
       }catch(e:any){errors.push({repository:full,error:e.message});}
     }
     await pool.query("UPDATE integrations SET status='Connected',last_sync_at=now() WHERE id=$1",[conn.rows[0].integration_id]);
-    await pool.query("UPDATE integration_connections SET last_validated_at=now(),last_error=$3 WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId,"github",errors.length?JSON.stringify(errors.slice(0,5)):null]);
+    await pool.query("UPDATE integration_connections SET last_validated_at=now(),last_error=$2 WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId,errors.length?JSON.stringify(errors.slice(0,5)):null]);
     await audit(req.user!,"SYNC","integration",conn.rows[0].integration_id,{provider:"github",repositories:repos.length,evidenceCreated:created,findingsCreated:findings,errors});
     res.json({repositoriesScanned:repos.length,evidenceCreated:created,findingsCreated:findings,errors});
   }catch(err:any){res.status(400).json({error:err.message||"GitHub sync failed"});}
