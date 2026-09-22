@@ -1,7 +1,7 @@
 window.addEventListener("unhandledrejection",e=>{console.error("Unhandled promise rejection",e.reason);const t=document.querySelector("#toast");if(t){t.textContent="An action failed. Please retry.";t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2500)}});
 const state={
   token:localStorage.getItem("revolt_token")||"",user:null,permissions:[],
-  dashboard:null,controls:[],evidence:[],assessments:[],findings:[],integrations:[],automation:[],library:[],report:[],frameworkCoverage:[],evidenceFreshness:null,assuranceSummary:null,audit:[],users:[],organization:null,
+  dashboard:null,progress:null,controls:[],evidence:[],assessments:[],findings:[],integrations:[],automation:[],library:[],report:[],frameworkCoverage:[],evidenceFreshness:null,assuranceSummary:null,audit:[],users:[],organization:null,
   page:"overview",currentControl:null
 };
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
@@ -44,16 +44,16 @@ async function loadAll(){
   document.body.classList.add("loading");
   try{
     const jobs=[
-      api("/api/dashboard"),api("/api/controls"),api("/api/evidence"),api("/api/assessments"),api("/api/findings"),api("/api/integrations"),
+      api("/api/dashboard"),api("/api/dashboard/progress?period=quarter"),api("/api/controls"),api("/api/evidence"),api("/api/assessments"),api("/api/findings"),api("/api/integrations"),
       api("/api/automation"),api("/api/control-library"),api("/api/reports/control-health"),api("/api/reports/framework-coverage"),api("/api/reports/evidence-freshness"),api("/api/reports/assurance-summary"),
       has("audit.read")?api("/api/audit"):Promise.resolve([]),has("users.read")?api("/api/users"):Promise.resolve([]),has("settings.read")?api("/api/settings/organization"):Promise.resolve(null)
     ];
-    const [dashboard,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users,organization]=await Promise.all(jobs);
-    Object.assign(state,{dashboard,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users,organization});renderAll();
+    const [dashboard,progress,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users,organization]=await Promise.all(jobs);
+    Object.assign(state,{dashboard,progress,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users,organization});renderAll();
   }catch(e){toast(e.message)}finally{document.body.classList.remove("loading")}
 }
 async function refresh(parts=["dashboard","controls","evidence","assessments","findings","integrations","automation","library","audit","users"]){
-  const routes={dashboard:"/api/dashboard",controls:"/api/controls",evidence:"/api/evidence",assessments:"/api/assessments",findings:"/api/findings",integrations:"/api/integrations",automation:"/api/automation",library:"/api/control-library",report:"/api/reports/control-health",frameworkCoverage:"/api/reports/framework-coverage",evidenceFreshness:"/api/reports/evidence-freshness",assuranceSummary:"/api/reports/assurance-summary",audit:"/api/audit",users:"/api/users"};
+  const routes={dashboard:"/api/dashboard",progress:"/api/dashboard/progress?period=quarter",controls:"/api/controls",evidence:"/api/evidence",assessments:"/api/assessments",findings:"/api/findings",integrations:"/api/integrations",automation:"/api/automation",library:"/api/control-library",report:"/api/reports/control-health",frameworkCoverage:"/api/reports/framework-coverage",evidenceFreshness:"/api/reports/evidence-freshness",assuranceSummary:"/api/reports/assurance-summary",audit:"/api/audit",users:"/api/users"};
   for(const p of parts){if((p==="audit"&&!has("audit.read"))||(p==="users"&&!has("users.read")))continue;state[p]=await api(routes[p])}
   renderAll();
 }
@@ -66,7 +66,7 @@ function go(page){
 function safeRender(name,fn){try{fn()}catch(err){console.error("Render failure:",name,err);toast(name+" could not render. Other pages remain available.")}}
 function renderAll(){
   [
-    ["Dashboard",renderDashboard],["Controls",renderControls],["Evidence Vault",renderEvidence],["Testing",renderAssessments],
+    ["Dashboard",renderDashboard],["Progress",renderProgress],["Controls",renderControls],["Evidence Vault",renderEvidence],["Testing",renderAssessments],
     ["Findings",renderFindings],["Integrations",renderIntegrations],["Automation",renderAutomation],["Control Library",renderLibrary],
     ["Control Health",renderReports],["Audit Trail",renderAudit],["Users",renderUsers],["Settings",renderSettings],["Filters",populateFilters]
   ].forEach(([name,fn])=>safeRender(name,fn));
@@ -87,6 +87,40 @@ function renderDashboard(){
   $("#activityList").innerHTML=(d.recentActivity||[]).length?(d.recentActivity||[]).map(x=>'<div class="activity-item"><span>↺</span><div><b>'+esc(x.action)+" "+esc(x.entity_type)+'</b><small>'+esc(x.name||"System")+'</small></div><time>'+fmtTime(x.created_at)+'</time></div>').join(""):'<div class="empty-state">No activity yet.</div>';
   const open=state.findings.filter(x=>!["Closed","Resolved"].includes(x.status)).slice(0,6);
   $("#overviewFindings").innerHTML=open.length?'<div class="table-card"><table><thead><tr><th>Issue</th><th>Control</th><th>Severity</th><th>Owner</th><th>Due</th><th>Status</th></tr></thead><tbody>'+open.map(x=>'<tr><td class="control-name"><b>'+esc(x.title)+'</b></td><td>'+esc(x.control_code||"—")+'</td><td>'+tag(x.severity)+'</td><td>'+esc(x.owner||"Unassigned")+'</td><td>'+fmtDate(x.due_date)+'</td><td>'+tag(x.status)+'</td></tr>').join("")+'</tbody></table></div>':'<div class="empty-state">No open issues.</div>';
+}
+async function loadProgress(){
+  if(!$("#progressPanel"))return;
+  const period=$("#progressPeriod")?.value||"quarter",frequency=$("#progressFrequency")?.value||"",officer=$("#progressOfficer")?.value||"";
+  try{
+    const qs=new URLSearchParams({period});
+    if(frequency)qs.set("frequency",frequency);
+    if(officer)qs.set("assignee_id",officer);
+    state.progress=await api("/api/dashboard/progress?"+qs.toString());
+    renderProgress();
+  }catch(e){toast(e.message)}
+}
+function renderProgress(){
+  if(!$("#progressSummary"))return;
+  const p=state.progress||{summary:{},by_frequency:[],by_officer:[],items:[],label:"Current period"},s=p.summary||{};
+  $("#progressSummary").innerHTML=[
+    ["Period",p.label||"—","Selected reporting period"],["Completion",(s.completion_percent||0)+"%",(s.completed||0)+" completed"],
+    ["In progress",s.in_progress||0,"Evidence/work started"],["Overdue",s.overdue||0,"Past control due date"],
+    ["Not started",s.not_started||0,"No period activity"],["Activity",(s.activity_percent||0)+"%","Weighted work progress"]
+  ].map(x=>'<div class="progress-kpi"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
+  $("#progressFrequencyGrid").innerHTML=(p.by_frequency||[]).length?p.by_frequency.map(x=>{const pct=x.total?Math.round(x.completed/x.total*100):0;return '<div class="progress-row"><span>'+esc(x.frequency)+' · '+x.completed+'/'+x.total+' done</span><div class="track"><i style="width:'+pct+'%"></i></div><b>'+pct+'%</b></div>'}).join(""):'<div class="empty-state">No frequency data.</div>';
+  $("#progressOfficerGrid").innerHTML=(p.by_officer||[]).length?p.by_officer.map(x=>{const pct=x.total?Math.round(x.completed/x.total*100):0;return '<div class="progress-row"><span>'+esc(x.name)+' · '+x.completed+'/'+x.total+' done</span><div class="track"><i style="width:'+pct+'%"></i></div><b>'+pct+'%</b></div>'}).join(""):'<div class="empty-state">No officer assignments yet.</div>';
+  $("#progressBody").innerHTML=(p.items||[]).length?p.items.map(x=>'<tr><td class="control-name"><b>'+esc(x.control_code)+' · '+esc(x.title)+'</b><span>'+esc(x.category)+'</span></td><td>'+esc(x.assigned_user_name||"Unassigned")+'</td><td>'+esc(x.frequency)+'</td><td>'+tag(x.risk_level)+'</td><td><span class="work-status '+String(x.work_status).toLowerCase().replace(/\s+/g,"-")+'">'+esc(x.work_status)+'</span></td><td>'+esc(x.period_evidence||0)+'</td><td>'+esc(x.open_findings||0)+'</td><td>'+fmtDate(x.next_due)+'</td><td><button class="action-btn" data-progress-control="'+x.id+'">Open</button></td></tr>').join(""):'<tr><td colspan="9" class="empty-state">No controls in the selected scope.</td></tr>';
+  $("[data-progress-control]").forEach(b=>b.onclick=()=>openControl(Number(b.dataset.progressControl)));
+  if($("#progressOfficer")){
+    const old=$("#progressOfficer").value;
+    const users=(state.users||[]).filter(u=>["control_manager","control_officer"].includes(u.role));
+    $("#progressOfficer").innerHTML='<option value="">All officers</option>'+users.map(u=>'<option value="'+u.id+'">'+esc(u.name)+'</option>').join("");
+    if(old&&users.some(u=>String(u.id)===old))$("#progressOfficer").value=old;
+    if(state.user?.role==="control_officer"){
+      $("#progressOfficer").innerHTML='<option value="'+state.user.id+'">'+esc(state.user.name)+'</option>';
+      $("#progressOfficer").disabled=true;
+    }
+  }
 }
 function filteredControls(){
   const q=$("#controlSearch")?.value?.toLowerCase()||"",cat=$("#categoryFilter")?.value||"",risk=$("#riskFilter")?.value||"";
