@@ -83,6 +83,7 @@ export const controlCatalog: ControlSeed[] = [
 ].map(x=>({code:x[0],title:x[1],description:x[2],category:x[3],framework:x[4],owner:x[5],frequency:x[6],risk:x[7] as any,evidence:x[8]}));
 
 export const integrationCatalog = [
+  ["revolt-os","Revolt-X OS","Core Platform","Service Account / Core API",["organisation","users","roles","branches","departments","teams","audit-context"]],
   ["microsoft-entra","Microsoft Entra ID","Identity","OAuth 2.0 / Microsoft Graph",["users","groups","roles","mfa","sign-ins","access-reviews"]],
   ["microsoft-365","Microsoft 365","Collaboration","OAuth 2.0 / Microsoft Graph",["mail-security","sharepoint","teams","audit","dlp"]],
   ["active-directory","Active Directory","Identity","Agent / LDAP",["users","groups","privileged-groups","password-policy","disabled-accounts"]],
