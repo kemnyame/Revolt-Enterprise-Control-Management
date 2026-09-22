@@ -901,15 +901,47 @@ app.post("/api/automation",auth,permit("automation.write"),async(req:AuthedReque
 
 app.post("/api/automation/:id/run",auth,permit("automation.write"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
-  const q=await pool.query(`SELECT a.*,i.status integration_status FROM automation_rules a JOIN integrations i ON i.id=a.integration_id
+  const q=await pool.query(`SELECT a.*,i.status integration_status,i.provider_key,c.control_code,c.owner control_owner
+    FROM automation_rules a JOIN integrations i ON i.id=a.integration_id JOIN controls c ON c.id=a.control_id
     WHERE a.id=$1 AND a.organization_id=$2`,[id,req.user!.orgId]);
   if(!q.rowCount) return res.status(404).json({error:"Automation rule not found"});
-  if(q.rows[0].integration_status!=="Connected") return res.status(409).json({error:"Connect and validate the source integration before running automated evidence collection"});
-  const provider=await pool.query("SELECT provider_key FROM integrations WHERE id=$1",[q.rows[0].integration_id]);
-  if(provider.rows[0]?.provider_key==="github"){
-    return res.status(202).json({message:"GitHub automation is available through the GitHub Sync action, which collects all mapped GitHub control evidence in one validated run."});
+  const rule=q.rows[0];
+  if(rule.integration_status!=="Connected") return res.status(409).json({error:"Connect and validate the source integration before running automated evidence collection"});
+  if(rule.provider_key==="github"){
+    return res.status(202).json({message:"Run GitHub Sync from Integrations. It collects the mapped GitHub controls in one validated repository pass."});
   }
-  res.status(501).json({error:"This connector is not live yet. Configure the provider credential and connector worker before automated collection can run."});
+  if(!liveConnectorKeys.includes(rule.provider_key as any)) return res.status(501).json({error:"This provider does not have a live evidence collector yet"});
+  const conn=await pool.query("SELECT * FROM integration_connections WHERE organization_id=$1 AND integration_id=$2",[req.user!.orgId,rule.integration_id]);
+  if(!conn.rowCount) return res.status(409).json({error:"The integration connection is missing or has been disconnected"});
+  try{
+    const credentials=decryptSecret(conn.rows[0]),config=conn.rows[0].config||{};
+    const collected=(await collectConnector(rule.provider_key,credentials,config)).filter((x:any)=>x.controlCode===rule.control_code);
+    if(!collected.length) return res.status(409).json({error:"This automation rule is not mapped to evidence returned by the provider adapter"});
+    let created=0,findings=0;
+    for(const item of collected){
+      const json=JSON.stringify(item.payload),sha=crypto.createHash("sha256").update(json).digest("hex");
+      await pool.query(`INSERT INTO evidence(organization_id,control_id,integration_id,title,evidence_type,source,period,status,automated,collected_at,expires_at,uploaded_by,sha256,review_status,evidence_payload)
+        VALUES($1,$2,$3,$4,$5,$6,to_char(current_date,'YYYY-MM'),'Current',true,now(),now()+interval '30 days',$7,$8,'Pending Review',$9::jsonb)`,[
+        req.user!.orgId,rule.control_id,rule.integration_id,item.title,rule.evidence_type||"System Snapshot",rule.provider_key,req.user!.id,sha,json
+      ]);created++;
+      if(item.finding){
+        const dup=await pool.query("SELECT id FROM findings WHERE organization_id=$1 AND control_id=$2 AND title=$3 AND status NOT IN ('Closed','Resolved')",[req.user!.orgId,rule.control_id,item.finding.title]);
+        if(!dup.rowCount){
+          await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date)
+            VALUES($1,$2,$3,$4,$5,'Open',$6,current_date+interval '14 days')`,[
+            req.user!.orgId,rule.control_id,item.finding.title,item.finding.description,item.finding.severity,item.finding.owner||rule.control_owner||""
+          ]);findings++;
+        }
+      }
+    }
+    await pool.query("UPDATE automation_rules SET last_run_at=now(),last_result=$2 WHERE id=$1",[id,`Success: ${created} evidence item(s), ${findings} finding(s)`]);
+    await pool.query("UPDATE integrations SET last_sync_at=now() WHERE id=$1",[rule.integration_id]);
+    await audit(req.user!,"RUN_AUTOMATION","automation_rule",id,{provider:rule.provider_key,evidenceCreated:created,findingsCreated:findings});
+    res.json({message:"Automation completed",evidenceCreated:created,findingsCreated:findings});
+  }catch(err:any){
+    await pool.query("UPDATE automation_rules SET last_run_at=now(),last_result=$2 WHERE id=$1",[id,"Failed: "+(err?.message||"Unknown error")]).catch(()=>{});
+    res.status(400).json({error:err?.message||"Automation run failed"});
+  }
 });
 
 app.get("/api/reports/control-health",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
