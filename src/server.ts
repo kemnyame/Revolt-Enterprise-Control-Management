@@ -417,6 +417,23 @@ app.get("/api/dashboard",auth,permit("dashboard.read"),async(req:AuthedRequest,r
   });
 });
 
+app.get("/api/control-library",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
+  const active=await pool.query("SELECT control_code FROM controls WHERE organization_id=$1",[req.user!.orgId]);
+  const activeSet=new Set(active.rows.map((r:any)=>r.control_code));
+  res.json(controlCatalog.map(item=>({...item,active:activeSet.has(item.code)})));
+});
+
+app.post("/api/control-library/:code/add",auth,permit("controls.write"),async(req:AuthedRequest,res)=>{
+  const item=controlCatalog.find(x=>x.code===req.params.code);
+  if(!item) return res.status(404).json({error:"Control template not found"});
+  try{
+    const q=await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,frequency,risk_level,evidence_required,next_due)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,current_date+interval '30 days') RETURNING *`,
+      [req.user!.orgId,item.code,item.title,item.description,item.category,item.framework,item.owner,item.frequency,item.risk,item.evidence]);
+    await audit(req.user!,"ADD_FROM_LIBRARY","control",q.rows[0].id,{code:item.code});res.status(201).json(q.rows[0]);
+  }catch(e:any){res.status(409).json({error:e.code==="23505"?"This control is already in the register":"Unable to add control"});}
+});
+
 app.get("/api/controls",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
   const {search="",category="",risk=""}=req.query as Record<string,string>;
   const out=await pool.query(`SELECT c.*,
