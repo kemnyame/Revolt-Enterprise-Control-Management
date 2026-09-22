@@ -1075,6 +1075,13 @@ async function runStartupSmokeTest(){
   if(Number(results.controls)<70) throw new Error(`Smoke test control count too low: ${results.controls}`);
   if(Number(results.integrations)<30) throw new Error(`Smoke test integration count too low: ${results.integrations}`);
 
+  const connectorCheck=await fetch(base+"/api/integrations",{headers});
+  if(!connectorCheck.ok) throw new Error(`Smoke test connector catalogue failed: ${connectorCheck.status}`);
+  const connectorRows:any[]=await connectorCheck.json();
+  const liveAdapters=connectorRows.filter((x:any)=>x.connector_live).length;
+  if(liveAdapters<8) throw new Error(`Smoke test live connector count too low: ${liveAdapters}`);
+  results.liveConnectorAdapters=liveAdapters;
+
   const settings=await fetch(base+"/api/settings/organization",{headers});
   if(!settings.ok) throw new Error(`Smoke test organization settings failed: ${settings.status}`);
   results.organizationSettings="ok";
