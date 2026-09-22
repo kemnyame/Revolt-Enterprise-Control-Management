@@ -7,6 +7,8 @@ import jwt from "jsonwebtoken";
 import { Pool } from "pg";
 import { z } from "zod";
 import path from "path";
+import multer from "multer";
+import crypto from "crypto";
 import { controlCatalog, integrationCatalog } from "./seed";
 
 type TokenPayload = { id:number; orgId:number; role:string; email:string; name:string };
@@ -24,7 +26,31 @@ const pool = new Pool({
 
 app.use(helmet({ contentSecurityPolicy:false }));
 app.use(cors());
-app.use(express.json({ limit:"2mb" }));
+app.use(express.json({ limit:"3mb" }));
+const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:8*1024*1024}});
+const integrationKey=crypto.createHash("sha256").update(process.env.INTEGRATION_ENCRYPTION_KEY || (process.env.NODE_ENV==="production" ? "" : "dev-integration-key")).digest();
+if(process.env.NODE_ENV==="production" && !process.env.INTEGRATION_ENCRYPTION_KEY) throw new Error("INTEGRATION_ENCRYPTION_KEY is required in production");
+
+function encryptSecret(value:any){
+  const iv=crypto.randomBytes(12);
+  const cipher=crypto.createCipheriv("aes-256-gcm",integrationKey,iv);
+  const encrypted=Buffer.concat([cipher.update(JSON.stringify(value),"utf8"),cipher.final()]);
+  return {ciphertext:encrypted.toString("base64"),iv:iv.toString("base64"),tag:cipher.getAuthTag().toString("base64")};
+}
+function decryptSecret(row:any){
+  const decipher=crypto.createDecipheriv("aes-256-gcm",integrationKey,Buffer.from(row.secret_iv,"base64"));
+  decipher.setAuthTag(Buffer.from(row.secret_tag,"base64"));
+  const plain=Buffer.concat([decipher.update(Buffer.from(row.secret_ciphertext,"base64")),decipher.final()]).toString("utf8");
+  return JSON.parse(plain);
+}
+async function githubApi(pathname:string,token:string){
+  const r=await fetch("https://api.github.com"+pathname,{headers:{
+    "Accept":"application/vnd.github+json","Authorization":"Bearer "+token,"X-GitHub-Api-Version":"2022-11-28","User-Agent":"Revolt-X-Control"
+  }});
+  const text=await r.text(); let body:any=null; try{body=text?JSON.parse(text):null}catch{body=text}
+  if(!r.ok){const err:any=new Error(body?.message||("GitHub request failed: "+r.status));err.status=r.status;err.body=body;throw err}
+  return {body,headers:r.headers};
+}
 
 const permissions: Record<string,string[]> = {
   admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
@@ -167,6 +193,32 @@ async function initDb(){
       last_result TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    CREATE TABLE IF NOT EXISTS evidence_files(
+      id BIGSERIAL PRIMARY KEY,
+      organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      original_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      sha256 TEXT NOT NULL,
+      content BYTEA NOT NULL,
+      uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS integration_connections(
+      id BIGSERIAL PRIMARY KEY,
+      organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      integration_id INTEGER NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+      provider_key TEXT NOT NULL,
+      secret_ciphertext TEXT NOT NULL,
+      secret_iv TEXT NOT NULL,
+      secret_tag TEXT NOT NULL,
+      config JSONB NOT NULL DEFAULT '{}'::jsonb,
+      connected_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      connected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_validated_at TIMESTAMPTZ,
+      last_error TEXT,
+      UNIQUE(organization_id,provider_key)
+    );
     CREATE TABLE IF NOT EXISTS audit_logs(
       id BIGSERIAL PRIMARY KEY,
       organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -177,6 +229,25 @@ async function initDb(){
       details JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS test_objective TEXT NOT NULL DEFAULT '';
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS test_procedure TEXT NOT NULL DEFAULT '';
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS sample_size INTEGER;
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS exception_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS design_effective BOOLEAN;
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS operating_effective BOOLEAN;
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS retest_of INTEGER;
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS reviewed_by INTEGER;
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+    ALTER TABLE assessments ADD COLUMN IF NOT EXISTS review_notes TEXT NOT NULL DEFAULT '';
+    ALTER TABLE evidence ADD COLUMN IF NOT EXISTS file_id BIGINT REFERENCES evidence_files(id) ON DELETE SET NULL;
+    ALTER TABLE evidence ADD COLUMN IF NOT EXISTS sha256 TEXT NOT NULL DEFAULT '';
+    ALTER TABLE evidence ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'Pending Review';
+    ALTER TABLE evidence ADD COLUMN IF NOT EXISTS reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+    ALTER TABLE evidence ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+    ALTER TABLE evidence ADD COLUMN IF NOT EXISTS review_notes TEXT NOT NULL DEFAULT '';
+    ALTER TABLE evidence ADD COLUMN IF NOT EXISTS evidence_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE findings ADD COLUMN IF NOT EXISTS source_assessment_id INTEGER REFERENCES assessments(id) ON DELETE SET NULL;
     CREATE INDEX IF NOT EXISTS idx_controls_org ON controls(organization_id);
     CREATE INDEX IF NOT EXISTS idx_assessments_org ON assessments(organization_id);
     CREATE INDEX IF NOT EXISTS idx_evidence_org ON evidence(organization_id);
@@ -359,6 +430,66 @@ app.get("/api/controls",auth,permit("controls.read"),async(req:AuthedRequest,res
   res.json(out.rows);
 });
 
+app.get("/api/controls/:id",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id);
+  const control=await pool.query("SELECT * FROM controls WHERE id=$1 AND organization_id=$2",[id,req.user!.orgId]);
+  if(!control.rowCount) return res.status(404).json({error:"Control not found"});
+  const [evidence,tests,findings]=await Promise.all([
+    pool.query(`SELECT e.*,u.name uploaded_by_name,rv.name reviewed_by_name FROM evidence e
+      LEFT JOIN users u ON u.id=e.uploaded_by LEFT JOIN users rv ON rv.id=e.reviewed_by
+      WHERE e.organization_id=$1 AND e.control_id=$2 ORDER BY e.created_at DESC`,[req.user!.orgId,id]),
+    pool.query(`SELECT a.*,u.name tester_name,rv.name reviewed_by_name FROM assessments a
+      LEFT JOIN users u ON u.id=a.tester_id LEFT JOIN users rv ON rv.id=a.reviewed_by
+      WHERE a.organization_id=$1 AND a.control_id=$2 ORDER BY a.tested_at DESC`,[req.user!.orgId,id]),
+    pool.query("SELECT * FROM findings WHERE organization_id=$1 AND control_id=$2 ORDER BY created_at DESC",[req.user!.orgId,id])
+  ]);
+  res.json({control:control.rows[0],evidence:evidence.rows,tests:tests.rows,findings:findings.rows});
+});
+
+app.post("/api/controls/:id/test",auth,permit("assessments.write"),async(req:AuthedRequest,res)=>{
+  const controlId=Number(req.params.id);
+  const schema=z.object({
+    period:z.string().min(2),
+    test_objective:z.string().min(5),
+    test_procedure:z.string().min(5),
+    result:z.enum(["Effective","Partially Effective","Ineffective"]),
+    score:z.number().int().min(0).max(100),
+    sample_size:z.number().int().min(0).nullable().optional(),
+    exception_count:z.number().int().min(0).default(0),
+    evidence_ids:z.array(z.number().int()).default([]),
+    design_effective:z.boolean().nullable().optional(),
+    operating_effective:z.boolean().nullable().optional(),
+    notes:z.string().default(""),
+    raise_finding:z.boolean().default(false),
+    finding_title:z.string().optional(),
+    finding_severity:z.enum(["Low","Medium","High"]).optional(),
+    retest_of:z.number().int().nullable().optional()
+  });
+  const p=schema.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Complete the required testing fields",details:p.error.flatten()});
+  const ctrl=await pool.query("SELECT * FROM controls WHERE id=$1 AND organization_id=$2",[controlId,req.user!.orgId]);
+  if(!ctrl.rowCount) return res.status(404).json({error:"Control not found"});
+  if(p.data.evidence_ids.length){
+    const ev=await pool.query("SELECT id FROM evidence WHERE organization_id=$1 AND control_id=$2 AND id=ANY($3::int[])",[req.user!.orgId,controlId,p.data.evidence_ids]);
+    if(ev.rowCount!==p.data.evidence_ids.length) return res.status(400).json({error:"One or more selected evidence items do not belong to this control"});
+  }
+  const d=p.data;
+  const q=await pool.query(`INSERT INTO assessments(organization_id,control_id,tester_id,period,result,score,notes,test_objective,test_procedure,sample_size,exception_count,evidence_ids,design_effective,operating_effective,retest_of)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15) RETURNING *`,[
+      req.user!.orgId,controlId,req.user!.id,d.period,d.result,d.score,d.notes,d.test_objective,d.test_procedure,d.sample_size??null,d.exception_count,JSON.stringify(d.evidence_ids),d.design_effective??null,d.operating_effective??null,d.retest_of??null
+  ]);
+  await pool.query("UPDATE controls SET last_tested=current_date,next_due=CASE frequency WHEN 'Monthly' THEN current_date+interval '1 month' WHEN 'Quarterly' THEN current_date+interval '3 months' WHEN 'Semi-Annual' THEN current_date+interval '6 months' WHEN 'Annual' THEN current_date+interval '1 year' ELSE current_date+interval '3 months' END,updated_at=now() WHERE id=$1",[controlId]);
+  let finding=null;
+  if(d.raise_finding && d.result!=="Effective"){
+    const fq=await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date,source_assessment_id)
+      VALUES($1,$2,$3,$4,$5,'Open',$6,current_date+interval '30 days',$7) RETURNING *`,[
+        req.user!.orgId,controlId,d.finding_title||("Control test exception - "+ctrl.rows[0].control_code),d.notes,d.finding_severity||"Medium",ctrl.rows[0].owner||"",q.rows[0].id
+    ]);
+    finding=fq.rows[0];
+  }
+  await audit(req.user!,"TEST_CONTROL","control",controlId,{assessmentId:q.rows[0].id,result:d.result,evidenceIds:d.evidence_ids,findingId:finding?.id||null});
+  res.status(201).json({assessment:q.rows[0],finding});
+});
+
 app.post("/api/controls",auth,permit("controls.write"),async(req:AuthedRequest,res)=>{
   const schema=z.object({control_code:z.string().min(3),title:z.string().min(3),description:z.string().default(""),category:z.string().min(2),framework_ref:z.string().default(""),owner:z.string().default(""),frequency:z.string().default("Quarterly"),risk_level:z.enum(["Low","Medium","High"]),evidence_required:z.string().default("")});
   const p=schema.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Please complete the required control fields",details:p.error.flatten()});
@@ -394,6 +525,43 @@ app.post("/api/assessments",auth,permit("assessments.write"),async(req:AuthedReq
   await audit(req.user!,"TEST","control",p.data.control_id,{assessmentId:q.rows[0].id,result:p.data.result}); res.status(201).json(q.rows[0]);
 });
 
+app.post("/api/evidence/upload",auth,permit("evidence.write"),upload.single("file"),async(req:AuthedRequest,res)=>{
+  if(!req.file) return res.status(400).json({error:"Choose a file to upload"});
+  const controlId=Number(req.body.control_id);
+  if(!Number.isInteger(controlId)) return res.status(400).json({error:"Select a control"});
+  const ctrl=await pool.query("SELECT id FROM controls WHERE id=$1 AND organization_id=$2",[controlId,req.user!.orgId]);
+  if(!ctrl.rowCount) return res.status(404).json({error:"Control not found"});
+  const sha=crypto.createHash("sha256").update(req.file.buffer).digest("hex");
+  const f=await pool.query(`INSERT INTO evidence_files(organization_id,original_name,mime_type,size_bytes,sha256,content,uploaded_by)
+    VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,original_name,mime_type,size_bytes,sha256,created_at`,[
+      req.user!.orgId,req.file.originalname,req.file.mimetype||"application/octet-stream",req.file.size,sha,req.file.buffer,req.user!.id
+  ]);
+  const ev=await pool.query(`INSERT INTO evidence(organization_id,control_id,title,evidence_type,source,period,status,uploaded_by,file_id,sha256,review_status)
+    VALUES($1,$2,$3,$4,'Manual Upload',$5,'Current',$6,$7,$8,'Pending Review') RETURNING *`,[
+      req.user!.orgId,controlId,req.body.title||req.file.originalname,req.body.evidence_type||"Document",req.body.period||"",req.user!.id,f.rows[0].id,sha
+  ]);
+  await audit(req.user!,"UPLOAD_EVIDENCE","control",controlId,{evidenceId:ev.rows[0].id,fileId:f.rows[0].id,sha256:sha});
+  res.status(201).json({...ev.rows[0],file:f.rows[0]});
+});
+
+app.get("/api/evidence/files/:id",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id);
+  const q=await pool.query("SELECT * FROM evidence_files WHERE id=$1 AND organization_id=$2",[id,req.user!.orgId]);
+  if(!q.rowCount) return res.status(404).json({error:"Evidence file not found"});
+  const f=q.rows[0];res.setHeader("Content-Type",f.mime_type);res.setHeader("Content-Length",String(f.size_bytes));
+  res.setHeader("Content-Disposition",'attachment; filename="'+String(f.original_name).replace(/"/g,"")+'"');res.send(f.content);
+});
+
+app.post("/api/evidence/:id/review",auth,permit("evidence.write"),async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id);
+  const s=z.object({review_status:z.enum(["Approved","Rejected","Needs Update"]),review_notes:z.string().default("")});
+  const p=s.safeParse(req.body);if(!p.success) return res.status(400).json({error:"Invalid review"});
+  const q=await pool.query(`UPDATE evidence SET review_status=$3,review_notes=$4,reviewed_by=$5,reviewed_at=now()
+    WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,p.data.review_status,p.data.review_notes,req.user!.id]);
+  if(!q.rowCount) return res.status(404).json({error:"Evidence not found"});
+  await audit(req.user!,"REVIEW_EVIDENCE","evidence",id,{status:p.data.review_status});res.json(q.rows[0]);
+});
+
 app.get("/api/evidence",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT e.*,c.control_code,c.title control_title,u.name uploaded_by_name FROM evidence e
     JOIN controls c ON c.id=e.control_id LEFT JOIN users u ON u.id=e.uploaded_by WHERE e.organization_id=$1 ORDER BY e.created_at DESC`,[req.user!.orgId]); res.json(q.rows);
@@ -424,10 +592,109 @@ app.post("/api/findings",auth,permit("findings.write"),async(req:AuthedRequest,r
 app.put("/api/findings/:id",auth,permit("findings.write"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id); const s=z.object({status:z.string(),owner:z.string().optional(),due_date:z.string().nullable().optional(),description:z.string().optional()}); const p=s.safeParse(req.body);
   if(!p.success) return res.status(400).json({error:"Invalid update"});
-  const d=p.data; const q=await pool.query(`UPDATE findings SET status=$3,owner=COALESCE($4,owner),due_date=COALESCE($5::date,due_date),description=COALESCE($6,description),
+  const existing=await pool.query("SELECT * FROM findings WHERE id=$1 AND organization_id=$2",[id,req.user!.orgId]);
+  if(!existing.rowCount) return res.status(404).json({error:"Finding not found"});
+  const d=p.data;
+  if(["Closed","Resolved"].includes(d.status)){
+    const pass=await pool.query(`SELECT id FROM assessments WHERE organization_id=$1 AND control_id=$2 AND result='Effective'
+      AND tested_at >= $3 ORDER BY tested_at DESC LIMIT 1`,[req.user!.orgId,existing.rows[0].control_id,existing.rows[0].created_at]);
+    if(!pass.rowCount) return res.status(409).json({error:"A passing retest is required before this finding can be closed"});
+  }
+  const q=await pool.query(`UPDATE findings SET status=$3,owner=COALESCE($4,owner),due_date=COALESCE($5::date,due_date),description=COALESCE($6,description),
     resolved_at=CASE WHEN $3 IN ('Closed','Resolved') THEN now() ELSE NULL END WHERE id=$1 AND organization_id=$2 RETURNING *`,
     [id,req.user!.orgId,d.status,d.owner??null,d.due_date??null,d.description??null]);
-  if(!q.rowCount) return res.status(404).json({error:"Finding not found"}); await audit(req.user!,"UPDATE","finding",id,{status:d.status}); res.json(q.rows[0]);
+  await audit(req.user!,"UPDATE","finding",id,{status:d.status}); res.json(q.rows[0]);
+});
+
+app.post("/api/integrations/github/connect",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+  const s=z.object({token:z.string().min(20),repositories:z.array(z.string()).default([])});
+  const p=s.safeParse(req.body);if(!p.success) return res.status(400).json({error:"A valid GitHub token is required"});
+  try{
+    const me=await githubApi("/user",p.data.token);
+    const integration=await pool.query("SELECT id FROM integrations WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId]);
+    if(!integration.rowCount) return res.status(404).json({error:"GitHub integration definition not found"});
+    const secret=encryptSecret({token:p.data.token});
+    await pool.query(`INSERT INTO integration_connections(organization_id,integration_id,provider_key,secret_ciphertext,secret_iv,secret_tag,config,connected_by,last_validated_at,last_error)
+      VALUES($1,$2,'github',$3,$4,$5,$6::jsonb,$7,now(),NULL)
+      ON CONFLICT(organization_id,provider_key) DO UPDATE SET integration_id=excluded.integration_id,secret_ciphertext=excluded.secret_ciphertext,secret_iv=excluded.secret_iv,secret_tag=excluded.secret_tag,config=excluded.config,connected_by=excluded.connected_by,connected_at=now(),last_validated_at=now(),last_error=NULL`,[
+        req.user!.orgId,integration.rows[0].id,secret.ciphertext,secret.iv,secret.tag,JSON.stringify({repositories:p.data.repositories,login:me.body.login}),req.user!.id
+    ]);
+    await pool.query("UPDATE integrations SET status='Connected',tenant_ref=$3,last_sync_at=NULL WHERE id=$1 AND organization_id=$2",[integration.rows[0].id,req.user!.orgId,me.body.login]);
+    await audit(req.user!,"CONNECT","integration",integration.rows[0].id,{provider:"github",login:me.body.login});
+    res.json({status:"Connected",account:{login:me.body.login,name:me.body.name,avatar_url:me.body.avatar_url},scopes:me.headers.get("x-oauth-scopes")||""});
+  }catch(err:any){res.status(err.status===401?401:400).json({error:err.message||"Unable to validate GitHub connection"});}
+});
+
+app.get("/api/integrations/github/repositories",auth,permit("integrations.read"),async(req:AuthedRequest,res)=>{
+  const q=await pool.query("SELECT * FROM integration_connections WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId]);
+  if(!q.rowCount) return res.status(409).json({error:"GitHub is not connected"});
+  try{
+    const {token}=decryptSecret(q.rows[0]); const data=await githubApi("/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",token);
+    const repos=(data.body||[]).map((r:any)=>({full_name:r.full_name,name:r.name,owner:r.owner?.login,private:r.private,default_branch:r.default_branch,archived:r.archived,updated_at:r.updated_at,permissions:r.permissions}));
+    res.json({repositories:repos,selected:q.rows[0].config?.repositories||[]});
+  }catch(err:any){await pool.query("UPDATE integration_connections SET last_error=$3 WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId,"github",err.message]);res.status(400).json({error:err.message});}
+});
+
+app.put("/api/integrations/github/config",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+  const s=z.object({repositories:z.array(z.string()).max(100)});const p=s.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid repository selection"});
+  const q=await pool.query("UPDATE integration_connections SET config=jsonb_set(COALESCE(config,'{}'::jsonb),'{repositories}',$3::jsonb,true) WHERE organization_id=$1 AND provider_key='github' RETURNING id",[req.user!.orgId,"github",JSON.stringify(p.data.repositories)]);
+  if(!q.rowCount)return res.status(409).json({error:"GitHub is not connected"});await audit(req.user!,"CONFIGURE","integration",null,{provider:"github",repositories:p.data.repositories});res.json({repositories:p.data.repositories});
+});
+
+app.post("/api/integrations/github/sync",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+  const conn=await pool.query("SELECT c.*,i.id integration_id FROM integration_connections c JOIN integrations i ON i.id=c.integration_id WHERE c.organization_id=$1 AND c.provider_key='github'",[req.user!.orgId]);
+  if(!conn.rowCount) return res.status(409).json({error:"GitHub is not connected"});
+  const {token}=decryptSecret(conn.rows[0]);let repos:string[]=conn.rows[0].config?.repositories||[];
+  try{
+    if(!repos.length){
+      const rr=await githubApi("/user/repos?per_page=30&sort=updated&affiliation=owner,collaborator,organization_member",token);
+      repos=(rr.body||[]).filter((r:any)=>!r.archived).slice(0,20).map((r:any)=>r.full_name);
+    }
+    const ctrlRows=await pool.query("SELECT id,control_code FROM controls WHERE organization_id=$1 AND control_code=ANY($2::text[])",[req.user!.orgId,["SDLC-002","SDLC-003","SDLC-004","SDLC-005"]]);
+    const byCode=Object.fromEntries(ctrlRows.rows.map((r:any)=>[r.control_code,r.id]));let created=0,findings=0,errors:any[]=[];
+    for(const full of repos.slice(0,40)){
+      const [owner,repo]=full.split("/"); if(!owner||!repo) continue;
+      try{
+        const repoResp=await githubApi("/repos/"+encodeURIComponent(owner)+"/"+encodeURIComponent(repo),token); const meta=repoResp.body;
+        let protection:any=null,protectionError:string|null=null,workflows:any=null,secrets:any=null,codeAlerts:any=null,dependabot:any=null,pulls:any=null;
+        try{protection=(await githubApi("/repos/"+owner+"/"+repo+"/branches/"+encodeURIComponent(meta.default_branch)+"/protection",token)).body}catch(e:any){protectionError=e.status===404?"Not enabled":e.message}
+        try{workflows=(await githubApi("/repos/"+owner+"/"+repo+"/actions/workflows?per_page=100",token)).body}catch(e:any){workflows={error:e.message}}
+        try{secrets=(await githubApi("/repos/"+owner+"/"+repo+"/secret-scanning/alerts?state=open&per_page=100",token)).body}catch(e:any){secrets={error:e.message}}
+        try{codeAlerts=(await githubApi("/repos/"+owner+"/"+repo+"/code-scanning/alerts?state=open&per_page=100",token)).body}catch(e:any){codeAlerts={error:e.message}}
+        try{dependabot=(await githubApi("/repos/"+owner+"/"+repo+"/dependabot/alerts?state=open&per_page=100",token)).body}catch(e:any){dependabot={error:e.message}}
+        try{pulls=(await githubApi("/repos/"+owner+"/"+repo+"/pulls?state=closed&per_page=30&sort=updated&direction=desc",token)).body}catch(e:any){pulls={error:e.message}}
+        const snapshots:any[]=[
+          ["SDLC-002","Source repository access & configuration",{repository:full,visibility:meta.visibility,private:meta.private,default_branch:meta.default_branch,permissions:meta.permissions,archived:meta.archived}],
+          ["SDLC-003","Branch protection & pull-request review",{repository:full,default_branch:meta.default_branch,branch_protection:protection,branch_protection_status:protectionError,recent_closed_pulls:Array.isArray(pulls)?pulls.slice(0,15).map((p:any)=>({number:p.number,merged_at:p.merged_at,user:p.user?.login,title:p.title})):pulls}],
+          ["SDLC-004","Secret and code security alerts",{repository:full,secret_scanning_alerts:secrets,code_scanning_alerts:codeAlerts,dependabot_alerts:dependabot}],
+          ["SDLC-005","CI/CD workflow inventory",{repository:full,workflows:workflows?.workflows||workflows,actions_permissions_url:meta.url+"/actions/permissions"}]
+        ];
+        for(const [code,label,payload] of snapshots){
+          if(!byCode[code]) continue; const json=JSON.stringify(payload);const sha=crypto.createHash("sha256").update(json).digest("hex");
+          await pool.query(`INSERT INTO evidence(organization_id,control_id,integration_id,title,evidence_type,source,period,status,automated,collected_at,expires_at,uploaded_by,sha256,review_status,evidence_payload)
+            VALUES($1,$2,$3,$4,'System Snapshot','GitHub',to_char(current_date,'YYYY-MM'),'Current',true,now(),now()+interval '30 days',$5,$6,'Pending Review',$7::jsonb)`,[
+              req.user!.orgId,byCode[code],conn.rows[0].integration_id,full+" - "+label,req.user!.id,sha,json
+          ]);created++;
+        }
+        if(byCode["SDLC-003"] && protectionError==="Not enabled"){
+          const dup=await pool.query("SELECT id FROM findings WHERE organization_id=$1 AND control_id=$2 AND title=$3 AND status NOT IN ('Closed','Resolved')",[req.user!.orgId,byCode["SDLC-003"],full+" default branch is not protected"]);
+          if(!dup.rowCount){await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date)
+            VALUES($1,$2,$3,$4,'High','Open','Engineering Lead',current_date+interval '14 days')`,[req.user!.orgId,byCode["SDLC-003"],full+" default branch is not protected","GitHub sync found no branch protection on "+meta.default_branch+"."]);findings++;}
+        }
+      }catch(e:any){errors.push({repository:full,error:e.message});}
+    }
+    await pool.query("UPDATE integrations SET status='Connected',last_sync_at=now() WHERE id=$1",[conn.rows[0].integration_id]);
+    await pool.query("UPDATE integration_connections SET last_validated_at=now(),last_error=$3 WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId,"github",errors.length?JSON.stringify(errors.slice(0,5)):null]);
+    await audit(req.user!,"SYNC","integration",conn.rows[0].integration_id,{provider:"github",repositories:repos.length,evidenceCreated:created,findingsCreated:findings,errors});
+    res.json({repositoriesScanned:repos.length,evidenceCreated:created,findingsCreated:findings,errors});
+  }catch(err:any){res.status(400).json({error:err.message||"GitHub sync failed"});}
+});
+
+app.delete("/api/integrations/github/connection",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+  const integration=await pool.query("SELECT id FROM integrations WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId]);
+  await pool.query("DELETE FROM integration_connections WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId]);
+  if(integration.rowCount) await pool.query("UPDATE integrations SET status='Available',tenant_ref='',last_sync_at=NULL WHERE id=$1",[integration.rows[0].id]);
+  await audit(req.user!,"DISCONNECT","integration",integration.rows[0]?.id||null,{provider:"github"});res.json({status:"Available"});
 });
 
 app.get("/api/integrations",auth,permit("integrations.read"),async(req:AuthedRequest,res)=>{
@@ -439,7 +706,7 @@ app.get("/api/integrations",auth,permit("integrations.read"),async(req:AuthedReq
 
 app.put("/api/integrations/:id",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
-  const s=z.object({status:z.enum(["Available","Configured","Connected","Paused"]),base_url:z.string().optional(),tenant_ref:z.string().optional()});
+  const s=z.object({status:z.enum(["Available","Configured","Paused"]),base_url:z.string().optional(),tenant_ref:z.string().optional()});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid integration settings"});
   const q=await pool.query(`UPDATE integrations SET status=$3,base_url=COALESCE($4,base_url),tenant_ref=COALESCE($5,tenant_ref),
     last_sync_at=CASE WHEN $3='Connected' THEN now() ELSE last_sync_at END WHERE id=$1 AND organization_id=$2 RETURNING *`,
@@ -473,7 +740,11 @@ app.post("/api/automation/:id/run",auth,permit("automation.write"),async(req:Aut
     WHERE a.id=$1 AND a.organization_id=$2`,[id,req.user!.orgId]);
   if(!q.rowCount) return res.status(404).json({error:"Automation rule not found"});
   if(q.rows[0].integration_status!=="Connected") return res.status(409).json({error:"Connect and validate the source integration before running automated evidence collection"});
-  res.status(501).json({error:"Live connector execution requires provider credentials and the provider-specific connector worker. The rule is ready but no credentials are configured."});
+  const provider=await pool.query("SELECT provider_key FROM integrations WHERE id=$1",[q.rows[0].integration_id]);
+  if(provider.rows[0]?.provider_key==="github"){
+    return res.status(202).json({message:"GitHub automation is available through the GitHub Sync action, which collects all mapped GitHub control evidence in one validated run."});
+  }
+  res.status(501).json({error:"This connector is not live yet. Configure the provider credential and connector worker before automated collection can run."});
 });
 
 app.get("/api/reports/control-health",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
