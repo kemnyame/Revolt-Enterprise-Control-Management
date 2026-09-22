@@ -164,6 +164,14 @@ async function updateFinding(id,status){
   catch(e){toast(e.message);renderFindings()}
 }
 function renderIntegrations(){
+  const os=state.integrations.find(i=>i.provider_key==="revolt-os");
+  if(os&&$("#osConnectionState")){
+    $("#osConnectionState").innerHTML='<div class="connection-state">Status: <strong>'+esc(os.status)+'</strong>'+(os.tenant_ref?' · Workspace: <strong>'+esc(os.tenant_ref)+'</strong>':'')+(os.last_sync_at?' · Last sync: '+fmtTime(os.last_sync_at):'')+'</div>';
+    $("#osActions").innerHTML=!has("integrations.write")?"":(os.status==="Connected"?'<button class="btn outline" id="syncOsBtn">Sync context</button><button class="btn outline" id="disconnectOsBtn">Disconnect</button>':'<button class="btn outline" id="connectOsBtn">Connect OS</button>');
+    $("#connectOsBtn")?.addEventListener("click",()=>connectProvider("revolt-os"));
+    $("#syncOsBtn")?.addEventListener("click",()=>syncProvider("revolt-os"));
+    $("#disconnectOsBtn")?.addEventListener("click",()=>disconnectProvider("revolt-os"));
+  }
   const gh=state.integrations.find(i=>i.provider_key==="github");
   if(gh){
     $("#githubConnectionState").innerHTML='<div class="connection-state">Status: <strong>'+esc(gh.status)+'</strong>'+(gh.tenant_ref?' · Account: <strong>'+esc(gh.tenant_ref)+'</strong>':'')+(gh.last_sync_at?' · Last sync: '+fmtTime(gh.last_sync_at):'')+'</div>';
@@ -183,7 +191,7 @@ function renderIntegrations(){
     ["Configured",configured,"setup started"]
   ].map(x=>'<div class="metric"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
   const q=$("#integrationSearch")?.value?.toLowerCase()||"",cat=$("#integrationCategory")?.value||"",status=$("#integrationStatus")?.value||"";
-  const rows=state.integrations.filter(i=>i.provider_key!=="github"&&(!q||(i.name+" "+i.category+" "+(i.capabilities||[]).join(" ")).toLowerCase().includes(q))&&(!cat||i.category===cat)&&(!status||i.status===status));
+  const rows=state.integrations.filter(i=>!["github","revolt-os"].includes(i.provider_key)&&(!q||(i.name+" "+i.category+" "+(i.capabilities||[]).join(" ")).toLowerCase().includes(q))&&(!cat||i.category===cat)&&(!status||i.status===status));
   $("#integrationGrid").innerHTML=rows.map(i=>{
     const live=!!i.connector_live;
     const action=!has("integrations.write")?"":live
@@ -201,7 +209,7 @@ function renderIntegrations(){
 
 function connectorFieldHtml(field,prefix){
   const [key,label,type,placeholder]=field;
-  return '<label>'+esc(label)+'<input name="'+prefix+'__'+esc(key)+'" type="'+esc(type||"text")+'" '+((type||"text")==="password"?'autocomplete="new-password"':'')+' placeholder="'+esc(placeholder||"")+'" required></label>';
+  const optional=String(label).toLowerCase().includes("(optional)");return '<label>'+esc(label)+'<input name="'+prefix+'__'+esc(key)+'" type="'+esc(type||"text")+'" '+((type||"text")==="password"?'autocomplete="new-password"':'')+' placeholder="'+esc(placeholder||"")+'" '+(optional?"":"required")+'></label>';
 }
 function connectProvider(provider){
   const item=state.integrations.find(i=>i.provider_key===provider);if(!item||!item.connector_live)return;
