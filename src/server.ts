@@ -10,6 +10,7 @@ import { z } from "zod";
 import path from "path";
 import multer from "multer";
 import crypto from "crypto";
+import archiver from "archiver";
 import { controlCatalog, integrationCatalog } from "./seed";
 import { liveConnectorKeys, connectorFields, validateConnector, collectConnector } from "./connectors";
 
@@ -86,7 +87,8 @@ async function githubApi(pathname:string,token:string){
 
 const permissions: Record<string,string[]> = {
   admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write","settings.read","settings.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
-  control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","automation.write","reports.read"],
+  control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","integrations.read","automation.read","automation.write","reports.read"],
+  control_officer:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","integrations.read","automation.read","reports.read"],
   auditor:["dashboard.read","controls.read","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   reviewer:["dashboard.read","controls.read","assessments.read","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","integrations.read","automation.read","reports.read"]
@@ -280,6 +282,8 @@ async function initDb(){
     ALTER TABLE evidence ADD COLUMN IF NOT EXISTS review_notes TEXT NOT NULL DEFAULT '';
     ALTER TABLE evidence ADD COLUMN IF NOT EXISTS evidence_payload JSONB NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE findings ADD COLUMN IF NOT EXISTS source_assessment_id INTEGER REFERENCES assessments(id) ON DELETE SET NULL;
+    ALTER TABLE controls ADD COLUMN IF NOT EXISTS assigned_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+    ALTER TABLE findings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
     ALTER TABLE organizations ADD COLUMN IF NOT EXISTS industry TEXT NOT NULL DEFAULT '';
     ALTER TABLE organizations ADD COLUMN IF NOT EXISTS country TEXT NOT NULL DEFAULT '';
     ALTER TABLE organizations ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';
@@ -457,6 +461,49 @@ app.get("/api/dashboard",auth,permit("dashboard.read"),async(req:AuthedRequest,r
   });
 });
 
+app.get("/api/dashboard/progress",auth,permit("dashboard.read"),async(req:AuthedRequest,res)=>{
+  const period=String(req.query.period||"quarter");
+  const frequency=String(req.query.frequency||"");
+  if(!["month","quarter","year"].includes(period)) return res.status(400).json({error:"Period must be month, quarter or year"});
+  const anchorRaw=String(req.query.anchor||new Date().toISOString().slice(0,10));
+  const anchor=new Date(anchorRaw+"T00:00:00Z");if(Number.isNaN(anchor.getTime()))return res.status(400).json({error:"Invalid anchor date"});
+  let start:Date,end:Date,label:string;
+  if(period==="month"){start=new Date(Date.UTC(anchor.getUTCFullYear(),anchor.getUTCMonth(),1));end=new Date(Date.UTC(anchor.getUTCFullYear(),anchor.getUTCMonth()+1,1));label=start.toLocaleString("en-GB",{month:"long",year:"numeric",timeZone:"UTC"});}
+  else if(period==="quarter"){const q=Math.floor(anchor.getUTCMonth()/3);start=new Date(Date.UTC(anchor.getUTCFullYear(),q*3,1));end=new Date(Date.UTC(anchor.getUTCFullYear(),q*3+3,1));label="Q"+(q+1)+" "+anchor.getUTCFullYear();}
+  else{start=new Date(Date.UTC(anchor.getUTCFullYear(),0,1));end=new Date(Date.UTC(anchor.getUTCFullYear()+1,0,1));label=String(anchor.getUTCFullYear());}
+  const requestedAssignee=Number(req.query.assignee_id||0)||null;
+  const assigneeId=req.user!.role==="control_officer"?req.user!.id:requestedAssignee;
+  const params:any[]=[req.user!.orgId,start.toISOString(),end.toISOString(),frequency,assigneeId];
+  const rows=await pool.query(`SELECT c.id,c.control_code,c.title,c.category,c.owner,c.frequency,c.risk_level,c.next_due,c.last_tested,c.assigned_user_id,u.name assigned_user_name,u.email assigned_user_email,
+    (SELECT a.id FROM assessments a WHERE a.control_id=c.id AND a.tested_at >= $2::timestamptz AND a.tested_at < $3::timestamptz ORDER BY a.tested_at DESC LIMIT 1) period_assessment_id,
+    (SELECT a.result FROM assessments a WHERE a.control_id=c.id AND a.tested_at >= $2::timestamptz AND a.tested_at < $3::timestamptz ORDER BY a.tested_at DESC LIMIT 1) period_result,
+    (SELECT a.score FROM assessments a WHERE a.control_id=c.id AND a.tested_at >= $2::timestamptz AND a.tested_at < $3::timestamptz ORDER BY a.tested_at DESC LIMIT 1) period_score,
+    (SELECT count(*)::int FROM evidence e WHERE e.control_id=c.id AND COALESCE(e.collected_at,e.created_at) >= $2::timestamptz AND COALESCE(e.collected_at,e.created_at) < $3::timestamptz) period_evidence,
+    (SELECT count(*)::int FROM findings f WHERE f.control_id=c.id AND f.status NOT IN ('Closed','Resolved')) open_findings
+    FROM controls c LEFT JOIN users u ON u.id=c.assigned_user_id
+    WHERE c.organization_id=$1 AND c.status='Active'
+      AND ($4='' OR c.frequency=$4)
+      AND ($5::int IS NULL OR c.assigned_user_id=$5)
+    ORDER BY c.risk_level='High' DESC,c.control_code`,params);
+  const now=new Date();
+  const items=rows.rows.map((r:any)=>{
+    const completed=Boolean(r.period_assessment_id);
+    const inProgress=!completed && Number(r.period_evidence)>0;
+    const overdue=!completed && !inProgress && r.next_due && new Date(r.next_due)<now;
+    const status=completed?"Completed":inProgress?"In Progress":overdue?"Overdue":"Not Started";
+    const progress=completed?100:inProgress?50:overdue?10:0;
+    return {...r,work_status:status,progress};
+  });
+  const count=(s:string)=>items.filter((x:any)=>x.work_status===s).length,total=items.length;
+  const byFrequency=Object.values(items.reduce((acc:any,x:any)=>{const k=x.frequency||"Other";acc[k]??={frequency:k,total:0,completed:0,in_progress:0,overdue:0,not_started:0};acc[k].total++;if(x.work_status==="Completed")acc[k].completed++;else if(x.work_status==="In Progress")acc[k].in_progress++;else if(x.work_status==="Overdue")acc[k].overdue++;else acc[k].not_started++;return acc;},{}));
+  const byOfficer=Object.values(items.reduce((acc:any,x:any)=>{const k=String(x.assigned_user_id||0);acc[k]??={user_id:x.assigned_user_id,name:x.assigned_user_name||"Unassigned",total:0,completed:0,in_progress:0,overdue:0};acc[k].total++;if(x.work_status==="Completed")acc[k].completed++;if(x.work_status==="In Progress")acc[k].in_progress++;if(x.work_status==="Overdue")acc[k].overdue++;return acc;},{}));
+  res.json({
+    period,label,start:start.toISOString(),end:end.toISOString(),frequency:frequency||"All",assignee_id:assigneeId,
+    summary:{total,completed:count("Completed"),in_progress:count("In Progress"),overdue:count("Overdue"),not_started:count("Not Started"),completion_percent:total?Math.round(count("Completed")/total*100):0,activity_percent:total?Math.round(items.reduce((s:number,x:any)=>s+x.progress,0)/total):0},
+    by_frequency:byFrequency,by_officer:byOfficer,items
+  });
+});
+
 app.get("/api/control-library",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
   const active=await pool.query("SELECT control_code FROM controls WHERE organization_id=$1",[req.user!.orgId]);
   const activeSet=new Set(active.rows.map((r:any)=>r.control_code));
@@ -476,11 +523,11 @@ app.post("/api/control-library/:code/add",auth,permit("controls.write"),async(re
 
 app.get("/api/controls",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
   const {search="",category="",risk=""}=req.query as Record<string,string>;
-  const out=await pool.query(`SELECT c.*,
+  const out=await pool.query(`SELECT c.*,au.name assigned_user_name,au.email assigned_user_email,
     (SELECT result FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1) latest_result,
     (SELECT count(*)::int FROM evidence e WHERE e.control_id=c.id) evidence_count,
     (SELECT count(*)::int FROM findings f WHERE f.control_id=c.id AND f.status NOT IN ('Closed','Resolved')) open_findings
-    FROM controls c WHERE c.organization_id=$1
+    FROM controls c LEFT JOIN users au ON au.id=c.assigned_user_id WHERE c.organization_id=$1
     AND ($2='' OR c.title ILIKE '%'||$2||'%' OR c.control_code ILIKE '%'||$2||'%')
     AND ($3='' OR c.category=$3) AND ($4='' OR c.risk_level=$4)
     ORDER BY c.control_code`,[req.user!.orgId,search,category,risk]);
@@ -489,7 +536,7 @@ app.get("/api/controls",auth,permit("controls.read"),async(req:AuthedRequest,res
 
 app.get("/api/controls/:id",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
-  const control=await pool.query("SELECT * FROM controls WHERE id=$1 AND organization_id=$2",[id,req.user!.orgId]);
+  const control=await pool.query("SELECT c.*,u.name assigned_user_name,u.email assigned_user_email FROM controls c LEFT JOIN users u ON u.id=c.assigned_user_id WHERE c.id=$1 AND c.organization_id=$2",[id,req.user!.orgId]);
   if(!control.rowCount) return res.status(404).json({error:"Control not found"});
   const [evidence,tests,findings]=await Promise.all([
     pool.query(`SELECT e.*,u.name uploaded_by_name,rv.name reviewed_by_name FROM evidence e
@@ -548,18 +595,18 @@ app.post("/api/controls/:id/test",auth,permit("assessments.write"),async(req:Aut
 });
 
 app.post("/api/controls",auth,permit("controls.write"),async(req:AuthedRequest,res)=>{
-  const schema=z.object({control_code:z.string().min(3),title:z.string().min(3),description:z.string().default(""),category:z.string().min(2),framework_ref:z.string().default(""),owner:z.string().default(""),frequency:z.string().default("Quarterly"),risk_level:z.enum(["Low","Medium","High"]),evidence_required:z.string().default("")});
+  const schema=z.object({control_code:z.string().min(3),title:z.string().min(3),description:z.string().default(""),category:z.string().min(2),framework_ref:z.string().default(""),owner:z.string().default(""),assigned_user_id:z.number().int().nullable().optional(),frequency:z.string().default("Quarterly"),risk_level:z.enum(["Low","Medium","High"]),evidence_required:z.string().default("")});
   const p=schema.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Please complete the required control fields",details:p.error.flatten()});
   try{
-    const d=p.data; const q=await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,frequency,risk_level,evidence_required,next_due)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,current_date + interval '30 days') RETURNING *`,
-      [req.user!.orgId,d.control_code,d.title,d.description,d.category,d.framework_ref,d.owner,d.frequency,d.risk_level,d.evidence_required]);
+    const d=p.data; const q=await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,assigned_user_id,frequency,risk_level,evidence_required,next_due)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,current_date + interval '30 days') RETURNING *`,
+      [req.user!.orgId,d.control_code,d.title,d.description,d.category,d.framework_ref,d.owner,d.assigned_user_id??null,d.frequency,d.risk_level,d.evidence_required]);
     await audit(req.user!,"CREATE","control",q.rows[0].id,{code:d.control_code}); res.status(201).json(q.rows[0]);
   }catch(e:any){res.status(409).json({error:e.code==="23505"?"Control code already exists":"Unable to create control"});}
 });
 
 app.put("/api/controls/:id",auth,permit("controls.write"),async(req:AuthedRequest,res)=>{
-  const id=Number(req.params.id); const allowed=["title","description","category","framework_ref","owner","frequency","status","risk_level","evidence_required","next_due"];
+  const id=Number(req.params.id); const allowed=["title","description","category","framework_ref","owner","assigned_user_id","frequency","status","risk_level","evidence_required","next_due"];
   const fields=allowed.filter(k=>req.body[k]!==undefined); if(!fields.length) return res.status(400).json({error:"No supported fields supplied"});
   const vals=fields.map(k=>req.body[k]); const set=fields.map((k,i)=>`${k}=$${i+3}`).join(",");
   const q=await pool.query(`UPDATE controls SET ${set},updated_at=now() WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,...vals]);
@@ -662,11 +709,19 @@ app.get("/api/findings",auth,permit("findings.read"),async(req:AuthedRequest,res
 });
 
 app.post("/api/findings",auth,permit("findings.write"),async(req:AuthedRequest,res)=>{
-  const s=z.object({control_id:z.number().int().nullable().optional(),title:z.string().min(3),description:z.string().default(""),severity:z.enum(["Low","Medium","High"]),status:z.string().default("Open"),owner:z.string().default(""),due_date:z.string().nullable().optional()});
-  const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid finding data",details:p.error.flatten()});
-  const d=p.data; const q=await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[req.user!.orgId,d.control_id??null,d.title,d.description,d.severity,d.status,d.owner,d.due_date??null]);
-  await audit(req.user!,"CREATE","finding",q.rows[0].id,{severity:d.severity}); res.status(201).json(q.rows[0]);
+  const s=z.object({control_id:z.number().int().nullable().optional(),title:z.string().trim().min(3),description:z.string().default(""),severity:z.enum(["Low","Medium","High"]),status:z.enum(["Open","In Progress"]).default("Open"),owner:z.string().default(""),due_date:z.union([z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/),z.literal(""),z.null()]).optional()});
+  const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Please check the finding fields",details:p.error.flatten()});
+  const d=p.data;
+  if(d.control_id){
+    const ctrl=await pool.query("SELECT id FROM controls WHERE id=$1 AND organization_id=$2",[d.control_id,req.user!.orgId]);
+    if(!ctrl.rowCount)return res.status(400).json({error:"The selected control does not belong to this workspace"});
+  }
+  try{
+    const q=await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date,updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING *`,[req.user!.orgId,d.control_id??null,d.title,d.description,d.severity,d.status,d.owner,d.due_date||null]);
+    await audit(req.user!,"CREATE","finding",q.rows[0].id,{severity:d.severity,controlId:d.control_id??null,status:d.status});
+    res.status(201).json(q.rows[0]);
+  }catch(err:any){console.error("Create finding failed",err);res.status(500).json({error:"Unable to save finding"});}
 });
 
 app.put("/api/findings/:id",auth,permit("findings.write"),async(req:AuthedRequest,res)=>{
@@ -680,7 +735,7 @@ app.put("/api/findings/:id",auth,permit("findings.write"),async(req:AuthedReques
       AND tested_at >= $3 ORDER BY tested_at DESC LIMIT 1`,[req.user!.orgId,existing.rows[0].control_id,existing.rows[0].created_at]);
     if(!pass.rowCount) return res.status(409).json({error:"A passing retest is required before this finding can be closed"});
   }
-  const q=await pool.query(`UPDATE findings SET status=$3,owner=COALESCE($4,owner),due_date=COALESCE($5::date,due_date),description=COALESCE($6,description),
+  const q=await pool.query(`UPDATE findings SET status=$3,owner=COALESCE($4,owner),due_date=COALESCE($5::date,due_date),description=COALESCE($6,description),updated_at=now(),
     resolved_at=CASE WHEN $3 IN ('Closed','Resolved') THEN now() ELSE NULL END WHERE id=$1 AND organization_id=$2 RETURNING *`,
     [id,req.user!.orgId,d.status,d.owner??null,d.due_date??null,d.description??null]);
   await audit(req.user!,"UPDATE","finding",id,{status:d.status}); res.json(q.rows[0]);
@@ -1023,6 +1078,65 @@ app.get("/api/reports/audit-pack.csv",auth,permit("reports.read"),async(req:Auth
   res.send(csv);
 });
 
+app.get("/api/reports/audit-pack.zip",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+  const o=req.user!.orgId;
+  const [org,controls,tests,evidence,findings,auditRows,integrations,files]=await Promise.all([
+    pool.query("SELECT name,slug,industry,country,timezone,contact_email,created_at FROM organizations WHERE id=$1",[o]),
+    pool.query(`SELECT c.*,u.name assigned_user_name,
+      COALESCE((SELECT a.result FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1),'Not Tested') latest_result,
+      COALESCE((SELECT a.score FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1),0) latest_score,
+      (SELECT count(*)::int FROM evidence e WHERE e.control_id=c.id) evidence_items,
+      (SELECT count(*)::int FROM findings f WHERE f.control_id=c.id AND f.status NOT IN ('Closed','Resolved')) open_findings
+      FROM controls c LEFT JOIN users u ON u.id=c.assigned_user_id WHERE c.organization_id=$1 ORDER BY c.category,c.control_code`,[o]),
+    pool.query(`SELECT a.id,c.control_code,c.title control_title,a.period,a.result,a.score,a.test_objective,a.test_procedure,a.sample_size,a.exception_count,a.design_effective,a.operating_effective,a.notes,a.review_status,a.review_notes,a.tested_at,u.name tester_name,rv.name reviewer_name
+      FROM assessments a JOIN controls c ON c.id=a.control_id LEFT JOIN users u ON u.id=a.tester_id LEFT JOIN users rv ON rv.id=a.reviewed_by
+      WHERE a.organization_id=$1 ORDER BY a.tested_at DESC`,[o]),
+    pool.query(`SELECT e.id,c.control_code,c.title control_title,e.title,e.evidence_type,e.source,e.period,e.status,e.automated,e.collected_at,e.expires_at,e.sha256,e.review_status,e.review_notes,uf.original_name,uf.mime_type,uf.size_bytes
+      FROM evidence e JOIN controls c ON c.id=e.control_id LEFT JOIN evidence_files uf ON uf.id=e.file_id
+      WHERE e.organization_id=$1 ORDER BY c.control_code,e.created_at DESC`,[o]),
+    pool.query(`SELECT f.id,c.control_code,c.title control_title,f.title,f.description,f.severity,f.status,f.owner,f.due_date,f.created_at,f.updated_at,f.resolved_at
+      FROM findings f LEFT JOIN controls c ON c.id=f.control_id WHERE f.organization_id=$1 ORDER BY f.created_at DESC`,[o]),
+    pool.query(`SELECT a.id,a.created_at,u.name user_name,u.email,a.action,a.entity_type,a.entity_id,a.details
+      FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id WHERE a.organization_id=$1 ORDER BY a.created_at DESC`,[o]),
+    pool.query(`SELECT name,category,auth_type,status,tenant_ref,last_sync_at,created_at FROM integrations WHERE organization_id=$1 ORDER BY category,name`,[o]),
+    pool.query(`SELECT f.id,f.original_name,f.mime_type,f.size_bytes,f.sha256,f.content,c.control_code,e.title evidence_title
+      FROM evidence_files f JOIN evidence e ON e.file_id=f.id JOIN controls c ON c.id=e.control_id
+      WHERE f.organization_id=$1 ORDER BY c.control_code,f.id`,[o])
+  ]);
+  const escCsv=(v:any)=>'"'+String(v??"").replace(/"/g,'""').replace(/\\r?\\n/g," ")+'"';
+  const csv=(rows:any[],cols:[string,string][])=>[cols.map(x=>escCsv(x[0])).join(","),...rows.map(r=>cols.map(x=>escCsv(r[x[1]])).join(","))].join("\\n");
+  const controlCols:any=[["Control Code","control_code"],["Title","title"],["Category","category"],["Framework","framework_ref"],["Owner","owner"],["Assigned Officer","assigned_user_name"],["Frequency","frequency"],["Risk","risk_level"],["Status","status"],["Last Tested","last_tested"],["Next Due","next_due"],["Latest Result","latest_result"],["Latest Score","latest_score"],["Evidence Items","evidence_items"],["Open Findings","open_findings"]];
+  const evidenceCols:any=[["ID","id"],["Control","control_code"],["Control Title","control_title"],["Evidence Title","title"],["Type","evidence_type"],["Source","source"],["Period","period"],["Status","status"],["Automated","automated"],["Collected","collected_at"],["Expires","expires_at"],["SHA-256","sha256"],["Review Status","review_status"],["File Name","original_name"],["MIME Type","mime_type"],["Size Bytes","size_bytes"]];
+  const testCols:any=[["ID","id"],["Control","control_code"],["Control Title","control_title"],["Period","period"],["Result","result"],["Score","score"],["Objective","test_objective"],["Procedure","test_procedure"],["Sample Size","sample_size"],["Exceptions","exception_count"],["Design Effective","design_effective"],["Operating Effective","operating_effective"],["Tester","tester_name"],["Review Status","review_status"],["Reviewer","reviewer_name"],["Review Notes","review_notes"],["Tested At","tested_at"]];
+  const findingCols:any=[["ID","id"],["Control","control_code"],["Control Title","control_title"],["Finding","title"],["Description","description"],["Severity","severity"],["Status","status"],["Owner","owner"],["Due Date","due_date"],["Created","created_at"],["Updated","updated_at"],["Resolved","resolved_at"]];
+  const auditCols:any=[["ID","id"],["Timestamp","created_at"],["User","user_name"],["Email","email"],["Action","action"],["Entity Type","entity_type"],["Entity ID","entity_id"],["Details","details"]];
+  const integrationCols:any=[["Name","name"],["Category","category"],["Auth Type","auth_type"],["Status","status"],["Account/Tenant","tenant_ref"],["Last Sync","last_sync_at"],["Created","created_at"]];
+  const summary={
+    generated_at:new Date().toISOString(),generated_by:req.user!.name,organisation:org.rows[0],
+    totals:{controls:controls.rowCount,tests:tests.rowCount,evidence:evidence.rowCount,findings:findings.rowCount,audit_events:auditRows.rowCount,integrations:integrations.rowCount},
+    open_findings:findings.rows.filter((x:any)=>!["Closed","Resolved"].includes(x.status)).length,
+    high_open_findings:findings.rows.filter((x:any)=>x.severity==="High"&&!["Closed","Resolved"].includes(x.status)).length,
+    effective_controls:controls.rows.filter((x:any)=>x.latest_result==="Effective").length
+  };
+  res.setHeader("Content-Type","application/zip");
+  res.setHeader("Content-Disposition",'attachment; filename="revolt-x-it-controls-audit-pack.zip"');
+  const archive=archiver("zip",{zlib:{level:9}});archive.on("error",(err:any)=>{console.error("Audit pack archive error",err);if(!res.headersSent)res.status(500).end();else res.end();});archive.pipe(res);
+  archive.append(JSON.stringify(summary,null,2),{name:"00-executive-summary.json"});
+  archive.append(`<!doctype html><html><head><meta charset="utf-8"><title>Revolt-X IT Controls Audit Pack</title><style>body{font-family:Arial,sans-serif;margin:36px;color:#222}h1{font-size:26px}.kpi{display:inline-block;border:1px solid #ddd;padding:14px;margin:6px;min-width:130px}table{border-collapse:collapse;width:100%;margin-top:20px}th,td{border:1px solid #ddd;padding:7px;font-size:12px;text-align:left}</style></head><body><h1>Revolt-X IT Controls Audit Pack</h1><p><b>Organisation:</b> ${String(org.rows[0]?.name||"")}</p><p><b>Generated:</b> ${new Date().toISOString()}</p><p><b>Generated by:</b> ${String(req.user!.name)}</p><div class="kpi"><b>${controls.rowCount}</b><br>Controls</div><div class="kpi"><b>${tests.rowCount}</b><br>Tests</div><div class="kpi"><b>${evidence.rowCount}</b><br>Evidence</div><div class="kpi"><b>${summary.open_findings}</b><br>Open findings</div><h2>Control summary</h2><table><tr><th>Control</th><th>Title</th><th>Owner</th><th>Frequency</th><th>Risk</th><th>Latest result</th><th>Evidence</th><th>Open findings</th></tr>${controls.rows.map((r:any)=>`<tr><td>${r.control_code}</td><td>${r.title}</td><td>${r.assigned_user_name||r.owner||""}</td><td>${r.frequency}</td><td>${r.risk_level}</td><td>${r.latest_result}</td><td>${r.evidence_items}</td><td>${r.open_findings}</td></tr>`).join("")}</table></body></html>`,{name:"01-executive-summary.html"});
+  archive.append(csv(controls.rows,controlCols),{name:"02-controls.csv"});
+  archive.append(csv(tests.rows,testCols),{name:"03-control-tests.csv"});
+  archive.append(csv(evidence.rows,evidenceCols),{name:"04-evidence-register.csv"});
+  archive.append(csv(findings.rows,findingCols),{name:"05-findings-remediation.csv"});
+  archive.append(csv(auditRows.rows,auditCols),{name:"06-audit-log.csv"});
+  archive.append(csv(integrations.rows,integrationCols),{name:"07-integrations.csv"});
+  archive.append(JSON.stringify({generated_at:new Date().toISOString(),files:files.rows.map((x:any)=>({control_code:x.control_code,evidence_title:x.evidence_title,file_name:x.original_name,mime_type:x.mime_type,size_bytes:x.size_bytes,sha256:x.sha256}))},null,2),{name:"08-evidence-file-manifest.json"});
+  let includedBytes=0;const cap=100*1024*1024;
+  for(const file of files.rows){if(includedBytes+Number(file.size_bytes)>cap)continue;includedBytes+=Number(file.size_bytes);const safe=String(file.original_name).replace(/[^a-zA-Z0-9._-]/g,"_");archive.append(file.content,{name:"evidence-files/"+String(file.control_code).replace(/[^a-zA-Z0-9._-]/g,"_")+"/"+file.id+"-"+safe});}
+  archive.append("This pack was generated by Revolt-X Enterprise Control Management. Verify source-file integrity using the SHA-256 values in the evidence register and manifest. Files beyond the 100 MB pack cap remain available in the Evidence Vault.",{name:"README.txt"});
+  await audit(req.user!,"EXPORT","audit_pack",null,{format:"zip",controls:controls.rowCount,evidence:evidence.rowCount,filesIncludedBytes:includedBytes});
+  await archive.finalize();
+});
+
 app.get("/api/settings/organization",auth,permit("settings.read"),async(req:AuthedRequest,res)=>{
   const q=await pool.query("SELECT id,name,slug,industry,country,timezone,contact_email,created_at FROM organizations WHERE id=$1",[req.user!.orgId]);
   res.json(q.rows[0]);
@@ -1050,8 +1164,15 @@ app.put("/api/users/:id/status",auth,permit("users.write"),async(req:AuthedReque
 });
 
 app.get("/api/audit",auth,permit("audit.read"),async(req:AuthedRequest,res)=>{
+  const search=String(req.query.search||""),action=String(req.query.action||""),entity=String(req.query.entity||"");
+  const limit=Math.min(1000,Math.max(1,Number(req.query.limit||500)||500));
   const q=await pool.query(`SELECT a.*,u.name user_name,u.email FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id
-    WHERE a.organization_id=$1 ORDER BY a.created_at DESC LIMIT 250`,[req.user!.orgId]); res.json(q.rows);
+    WHERE a.organization_id=$1
+      AND ($2='' OR a.action=$2)
+      AND ($3='' OR a.entity_type=$3)
+      AND ($4='' OR COALESCE(u.name,'') ILIKE '%'||$4||'%' OR COALESCE(u.email,'') ILIKE '%'||$4||'%' OR a.action ILIKE '%'||$4||'%' OR a.entity_type ILIKE '%'||$4||'%' OR a.details::text ILIKE '%'||$4||'%')
+    ORDER BY a.created_at DESC LIMIT $5`,[req.user!.orgId,action,entity,search,limit]);
+  res.json(q.rows);
 });
 
 app.get("/api/users",auth,permit("users.read"),async(req:AuthedRequest,res)=>{
@@ -1059,7 +1180,7 @@ app.get("/api/users",auth,permit("users.read"),async(req:AuthedRequest,res)=>{
 });
 
 app.post("/api/users",auth,permit("users.write"),async(req:AuthedRequest,res)=>{
-  const s=z.object({name:z.string().min(2),email:z.string().email(),password:z.string().min(8),role:z.enum(["admin","control_manager","auditor","reviewer","viewer"])});
+  const s=z.object({name:z.string().min(2),email:z.string().email(),password:z.string().min(8),role:z.enum(["admin","control_manager","control_officer","auditor","reviewer","viewer"])});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid user data",details:p.error.flatten()});
   try{ const hash=await bcrypt.hash(p.data.password,12); const q=await pool.query("INSERT INTO users(organization_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5) RETURNING id,name,email,role,status,created_at",[req.user!.orgId,p.data.name,p.data.email,hash,p.data.role]); await audit(req.user!,"CREATE","user",q.rows[0].id,{role:p.data.role}); res.status(201).json(q.rows[0]); }
   catch(e:any){res.status(409).json({error:e.code==="23505"?"Email already exists":"Unable to create user"});}
