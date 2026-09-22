@@ -56,7 +56,7 @@ const permissions: Record<string,string[]> = {
   admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write","settings.read","settings.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
   control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","automation.write","reports.read"],
   auditor:["dashboard.read","controls.read","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
-  reviewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
+  reviewer:["dashboard.read","controls.read","assessments.read","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","integrations.read","automation.read","reports.read"]
 };
 
@@ -700,18 +700,20 @@ app.post("/api/integrations/github/sync",auth,permit("integrations.write"),async
       const [owner,repo]=full.split("/"); if(!owner||!repo) continue;
       try{
         const repoResp=await githubApi("/repos/"+encodeURIComponent(owner)+"/"+encodeURIComponent(repo),token); const meta=repoResp.body;
-        let protection:any=null,protectionError:string|null=null,workflows:any=null,secrets:any=null,codeAlerts:any=null,dependabot:any=null,pulls:any=null;
+        let protection:any=null,protectionError:string|null=null,workflows:any=null,secrets:any=null,codeAlerts:any=null,dependabot:any=null,pulls:any=null,collaborators:any=null,actionsPermissions:any=null;
         try{protection=(await githubApi("/repos/"+owner+"/"+repo+"/branches/"+encodeURIComponent(meta.default_branch)+"/protection",token)).body}catch(e:any){protectionError=e.status===404?"Not enabled":e.message}
         try{workflows=(await githubApi("/repos/"+owner+"/"+repo+"/actions/workflows?per_page=100",token)).body}catch(e:any){workflows={error:e.message}}
+        try{actionsPermissions=(await githubApi("/repos/"+owner+"/"+repo+"/actions/permissions",token)).body}catch(e:any){actionsPermissions={error:e.message}}
+        try{collaborators=(await githubApi("/repos/"+owner+"/"+repo+"/collaborators?affiliation=direct&per_page=100",token)).body}catch(e:any){collaborators={error:e.message}}
         try{secrets=(await githubApi("/repos/"+owner+"/"+repo+"/secret-scanning/alerts?state=open&per_page=100",token)).body}catch(e:any){secrets={error:e.message}}
         try{codeAlerts=(await githubApi("/repos/"+owner+"/"+repo+"/code-scanning/alerts?state=open&per_page=100",token)).body}catch(e:any){codeAlerts={error:e.message}}
         try{dependabot=(await githubApi("/repos/"+owner+"/"+repo+"/dependabot/alerts?state=open&per_page=100",token)).body}catch(e:any){dependabot={error:e.message}}
         try{pulls=(await githubApi("/repos/"+owner+"/"+repo+"/pulls?state=closed&per_page=30&sort=updated&direction=desc",token)).body}catch(e:any){pulls={error:e.message}}
         const snapshots:any[]=[
-          ["SDLC-002","Source repository access & configuration",{repository:full,visibility:meta.visibility,private:meta.private,default_branch:meta.default_branch,permissions:meta.permissions,archived:meta.archived}],
+          ["SDLC-002","Source repository access & configuration",{repository:full,visibility:meta.visibility,private:meta.private,default_branch:meta.default_branch,permissions:meta.permissions,archived:meta.archived,direct_collaborators:Array.isArray(collaborators)?collaborators.map((u:any)=>({login:u.login,role_name:u.role_name,permissions:u.permissions})):collaborators}],
           ["SDLC-003","Branch protection & pull-request review",{repository:full,default_branch:meta.default_branch,branch_protection:protection,branch_protection_status:protectionError,recent_closed_pulls:Array.isArray(pulls)?pulls.slice(0,15).map((p:any)=>({number:p.number,merged_at:p.merged_at,user:p.user?.login,title:p.title})):pulls}],
           ["SDLC-004","Secret and code security alerts",{repository:full,secret_scanning_alerts:secrets,code_scanning_alerts:codeAlerts,dependabot_alerts:dependabot}],
-          ["SDLC-005","CI/CD workflow inventory",{repository:full,workflows:workflows?.workflows||workflows,actions_permissions_url:meta.url+"/actions/permissions"}]
+          ["SDLC-005","CI/CD workflow inventory",{repository:full,workflows:workflows?.workflows||workflows,actions_permissions:actionsPermissions}]
         ];
         for(const [code,label,payload] of snapshots){
           if(!byCode[code]) continue; const json=JSON.stringify(payload);const sha=crypto.createHash("sha256").update(json).digest("hex");
@@ -724,6 +726,17 @@ app.post("/api/integrations/github/sync",auth,permit("integrations.write"),async
           const dup=await pool.query("SELECT id FROM findings WHERE organization_id=$1 AND control_id=$2 AND title=$3 AND status NOT IN ('Closed','Resolved')",[req.user!.orgId,byCode["SDLC-003"],full+" default branch is not protected"]);
           if(!dup.rowCount){await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date)
             VALUES($1,$2,$3,$4,'High','Open','Engineering Lead',current_date+interval '14 days')`,[req.user!.orgId,byCode["SDLC-003"],full+" default branch is not protected","GitHub sync found no branch protection on "+meta.default_branch+"."]);findings++;}
+        }
+        const secretCount=Array.isArray(secrets)?secrets.length:0;
+        const codeHigh=Array.isArray(codeAlerts)?codeAlerts.filter((a:any)=>["critical","high"].includes(String(a.rule?.security_severity_level||"").toLowerCase())).length:0;
+        const depHigh=Array.isArray(dependabot)?dependabot.filter((a:any)=>["critical","high"].includes(String(a.security_advisory?.severity||"").toLowerCase())).length:0;
+        if(byCode["SDLC-004"] && (secretCount>0 || codeHigh>0 || depHigh>0)){
+          const title=full+" has open high-risk repository security alerts";
+          const dup=await pool.query("SELECT id FROM findings WHERE organization_id=$1 AND control_id=$2 AND title=$3 AND status NOT IN ('Closed','Resolved')",[req.user!.orgId,byCode["SDLC-004"],title]);
+          if(!dup.rowCount){await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date)
+            VALUES($1,$2,$3,$4,'High','Open','DevOps Lead',current_date+interval '7 days')`,[
+              req.user!.orgId,byCode["SDLC-004"],title,"GitHub sync found "+secretCount+" open secret-scanning alert(s), "+codeHigh+" high/critical code-scanning alert(s), and "+depHigh+" high/critical Dependabot alert(s)."
+            ]);findings++;}
         }
       }catch(e:any){errors.push({repository:full,error:e.message});}
     }
