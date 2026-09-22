@@ -121,18 +121,59 @@ function renderIntegrations(){
     $("#syncGithubBtn")?.addEventListener("click",syncGithub);
     $("#disconnectGithubBtn")?.addEventListener("click",disconnectGithub);
   }
-  const connected=state.integrations.filter(i=>i.status==="Connected").length,configured=state.integrations.filter(i=>i.status==="Configured").length;
+  const connected=state.integrations.filter(i=>i.status==="Connected").length,configured=state.integrations.filter(i=>i.status==="Configured").length,live=state.integrations.filter(i=>i.connector_live||i.provider_key==="github").length;
   $("#integrationSummary").innerHTML=[
     ["Connector catalogue",state.integrations.length,"available source types"],
-    ["Live connections",connected,"validated providers"],
-    ["Configured",configured,"setup started"],
-    ["Evidence automation",state.integrations.filter(i=>Number(i.automation_count)>0).length,"providers mapped to rules"]
+    ["Live adapters",live,"credential-validated connectors"],
+    ["Connected",connected,"active source connections"],
+    ["Configured",configured,"setup started"]
   ].map(x=>'<div class="metric"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
   const q=$("#integrationSearch")?.value?.toLowerCase()||"",cat=$("#integrationCategory")?.value||"",status=$("#integrationStatus")?.value||"";
   const rows=state.integrations.filter(i=>i.provider_key!=="github"&&(!q||(i.name+" "+i.category+" "+(i.capabilities||[]).join(" ")).toLowerCase().includes(q))&&(!cat||i.category===cat)&&(!status||i.status===status));
-  $("#integrationGrid").innerHTML=rows.map(i=>'<article class="integration-card"><div class="integration-card-head"><span class="integration-logo">'+initials(i.name)+'</span>'+tag(i.status)+'</div><h3>'+esc(i.name)+'</h3><p>'+esc(i.category)+' · '+esc(i.auth_type)+'</p><div class="capabilities">'+(Array.isArray(i.capabilities)?i.capabilities:[]).slice(0,6).map(x=>'<span>'+esc(x)+'</span>').join("")+'</div><div class="integration-foot"><span>'+esc(i.automation_count||0)+' mapped rule(s)</span><button '+(i.provider_key==="github"?'data-github-shortcut':'data-provider-info="'+esc(i.name)+'"')+'>'+(i.provider_key==="github"?(i.status==="Connected"?"Manage":"Connect"):"Connector details")+'</button></div></article>').join("");
-  $$("[data-github-shortcut]").forEach(b=>b.onclick=()=>gh?.status==="Connected"?manageGithubRepos():connectGithub());
-  $$("[data-provider-info]").forEach(b=>b.onclick=()=>modal('<span class="caps">CONNECTOR ROADMAP</span><h2>'+esc(b.dataset.providerInfo)+'</h2><p>This provider is in the integration catalogue, but only connectors that complete credential validation and live evidence collection are marked Connected. GitHub is the first live commercial connector in this rollout.</p><div class="manual-tip">The platform will not fake connection status or automated evidence for a provider that has not passed a live connector validation.</div><div class="form-actions"><button class="btn dark" data-close-modal>Close</button></div>'));
+  $("#integrationGrid").innerHTML=rows.map(i=>{
+    const live=!!i.connector_live;
+    const action=!has("integrations.write")?"":live
+      ?(i.status==="Connected"
+        ?'<button data-provider-sync="'+esc(i.provider_key)+'">Sync now</button><button data-provider-disconnect="'+esc(i.provider_key)+'">Disconnect</button>'
+        :'<button data-provider-connect="'+esc(i.provider_key)+'">Connect</button>')
+      :'<button data-provider-info="'+esc(i.name)+'">Connector details</button>';
+    return '<article class="integration-card"><div class="integration-card-head"><span class="integration-logo">'+initials(i.name)+'</span>'+tag(i.status)+'</div><h3>'+esc(i.name)+(live?' <span class="tag connected">LIVE</span>':'')+'</h3><p>'+esc(i.category)+' · '+esc(i.auth_type)+'</p><div class="capabilities">'+(Array.isArray(i.capabilities)?i.capabilities:[]).slice(0,6).map(x=>'<span>'+esc(x)+'</span>').join("")+'</div><div class="integration-foot"><span>'+(i.last_sync_at?'Synced '+fmtTime(i.last_sync_at):(live?"Live adapter ready":"Connector catalogue"))+'</span><span class="row-actions">'+action+'</span></div></article>';
+  }).join("");
+  $$("[data-provider-connect]").forEach(b=>b.onclick=()=>connectProvider(b.dataset.providerConnect));
+  $$("[data-provider-sync]").forEach(b=>b.onclick=()=>syncProvider(b.dataset.providerSync));
+  $$("[data-provider-disconnect]").forEach(b=>b.onclick=()=>disconnectProvider(b.dataset.providerDisconnect));
+  $$("[data-provider-info]").forEach(b=>b.onclick=()=>modal('<span class="caps">CONNECTOR CATALOGUE</span><h2>'+esc(b.dataset.providerInfo)+'</h2><p>This source is mapped in the enterprise connector catalogue, but its direct cloud adapter is not enabled yet. It will not be marked Connected until credential validation and live evidence collection are implemented.</p><div class="manual-tip">On-premise and private-network systems will use the Revolt-X Connector Agent rather than allowing the public web service to access internal network addresses.</div><div class="form-actions"><button class="btn dark" data-close-modal>Close</button></div>'));
+}
+
+function connectorFieldHtml(field,prefix){
+  const [key,label,type,placeholder]=field;
+  return '<label>'+esc(label)+'<input name="'+prefix+'__'+esc(key)+'" type="'+esc(type||"text")+'" '+((type||"text")==="password"?'autocomplete="new-password"':'')+' placeholder="'+esc(placeholder||"")+'" required></label>';
+}
+function connectProvider(provider){
+  const item=state.integrations.find(i=>i.provider_key===provider);if(!item||!item.connector_live)return;
+  const fields=item.connector_fields||{credentials:[],config:[]};
+  modal('<span class="caps">LIVE CONNECTOR</span><h2>Connect '+esc(item.name)+'</h2><p>The application validates these credentials against the provider before the connection is marked Connected. Secrets are encrypted before storage.</p><form class="form" id="providerConnectForm">'+
+    (fields.config||[]).map(f=>connectorFieldHtml(f,"config")).join("")+
+    (fields.credentials||[]).map(f=>connectorFieldHtml(f,"credential")).join("")+
+    '<div class="manual-tip">Use a dedicated read-only or least-privilege integration identity wherever the provider supports one.</div><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Validate & connect</button></div></form>');
+  $("#providerConnectForm").onsubmit=async e=>{
+    e.preventDefault();const fd=new FormData(e.target),credentials={},config={};
+    for(const [k,v] of fd.entries()){const [kind,key]=String(k).split("__");if(kind==="credential")credentials[key]=v;else if(kind==="config")config[key]=v}
+    try{const d=await api("/api/integrations/"+encodeURIComponent(provider)+"/connect",{method:"POST",body:JSON.stringify({credentials,config})});closeModal();toast(item.name+" connected as "+(d.identity||"validated source"));await refresh(["integrations","audit"])}
+    catch(err){toast(err.message)}
+  };
+}
+async function syncProvider(provider){
+  const item=state.integrations.find(i=>i.provider_key===provider);if(!item)return;
+  if(!confirm("Collect fresh "+item.name+" evidence now?"))return;
+  try{const d=await api("/api/integrations/"+encodeURIComponent(provider)+"/sync",{method:"POST",body:"{}"});toast(item.name+": "+d.evidenceCreated+" evidence item(s), "+d.findingsCreated+" finding(s)");await refresh(["integrations","evidence","findings","controls","dashboard","audit"])}
+  catch(e){toast(e.message)}
+}
+async function disconnectProvider(provider){
+  const item=state.integrations.find(i=>i.provider_key===provider);if(!item)return;
+  if(!confirm("Disconnect "+item.name+"? Historical evidence will remain."))return;
+  try{await api("/api/integrations/"+encodeURIComponent(provider)+"/connection",{method:"DELETE"});toast(item.name+" disconnected");await refresh(["integrations","audit"])}
+  catch(e){toast(e.message)}
 }
 function renderAutomation(){
   if(!$("#automationBody"))return;
