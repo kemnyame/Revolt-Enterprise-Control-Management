@@ -11,6 +11,7 @@ import path from "path";
 import multer from "multer";
 import crypto from "crypto";
 import { controlCatalog, integrationCatalog } from "./seed";
+import { liveConnectorKeys, connectorFields, validateConnector, collectConnector } from "./connectors";
 
 type TokenPayload = { id:number; orgId:number; role:string; email:string; name:string };
 type AuthedRequest = Request & { user?: TokenPayload };
@@ -789,11 +790,83 @@ app.delete("/api/integrations/github/connection",auth,permit("integrations.write
   await audit(req.user!,"DISCONNECT","integration",integration.rows[0]?.id||null,{provider:"github"});res.json({status:"Available"});
 });
 
+app.post("/api/integrations/:provider/connect",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+  const provider=String(req.params.provider||"");
+  if(provider==="github") return res.status(400).json({error:"Use the dedicated GitHub connection flow"});
+  if(!liveConnectorKeys.includes(provider as any)) return res.status(400).json({error:"This connector is catalogued but its live adapter is not enabled yet"});
+  const credentials=req.body?.credentials||{},config=req.body?.config||{};
+  try{
+    const validation=await validateConnector(provider,credentials,config);
+    const integration=await pool.query("SELECT id FROM integrations WHERE organization_id=$1 AND provider_key=$2",[req.user!.orgId,provider]);
+    if(!integration.rowCount)return res.status(404).json({error:"Integration definition not found"});
+    const secret=encryptSecret(credentials);
+    const safeConfig={...config,identity:validation.identity,metadata:validation.metadata};
+    await pool.query(`INSERT INTO integration_connections(organization_id,integration_id,provider_key,secret_ciphertext,secret_iv,secret_tag,config,connected_by,last_validated_at,last_error)
+      VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,now(),NULL)
+      ON CONFLICT(organization_id,provider_key) DO UPDATE SET integration_id=excluded.integration_id,secret_ciphertext=excluded.secret_ciphertext,secret_iv=excluded.secret_iv,secret_tag=excluded.secret_tag,config=excluded.config,connected_by=excluded.connected_by,connected_at=now(),last_validated_at=now(),last_error=NULL`,[
+      req.user!.orgId,integration.rows[0].id,provider,secret.ciphertext,secret.iv,secret.tag,JSON.stringify(safeConfig),req.user!.id
+    ]);
+    await pool.query("UPDATE integrations SET status='Connected',tenant_ref=$3,last_sync_at=NULL WHERE id=$1 AND organization_id=$2",[integration.rows[0].id,req.user!.orgId,validation.identity||provider]);
+    await audit(req.user!,"CONNECT","integration",integration.rows[0].id,{provider,identity:validation.identity});
+    res.json({status:"Connected",identity:validation.identity,metadata:validation.metadata});
+  }catch(err:any){res.status(err?.status===401||err?.status===403?401:400).json({error:err?.message||"Connector validation failed"});}
+});
+
+app.post("/api/integrations/:provider/sync",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+  const provider=String(req.params.provider||"");
+  if(provider==="github") return res.status(400).json({error:"Use the dedicated GitHub sync flow"});
+  if(!liveConnectorKeys.includes(provider as any)) return res.status(400).json({error:"This connector does not have a live adapter yet"});
+  const conn=await pool.query(`SELECT c.*,i.id integration_id FROM integration_connections c JOIN integrations i ON i.id=c.integration_id
+    WHERE c.organization_id=$1 AND c.provider_key=$2`,[req.user!.orgId,provider]);
+  if(!conn.rowCount)return res.status(409).json({error:"Connect and validate this provider before syncing"});
+  try{
+    const credentials=decryptSecret(conn.rows[0]),config=conn.rows[0].config||{};
+    const collected=await collectConnector(provider,credentials,config);
+    const codes=[...new Set(collected.map((e:any)=>e.controlCode))];
+    const ctrl=await pool.query("SELECT id,control_code,owner FROM controls WHERE organization_id=$1 AND control_code=ANY($2::text[])",[req.user!.orgId,codes]);
+    const byCode=Object.fromEntries(ctrl.rows.map((r:any)=>[r.control_code,r]));
+    let created=0,findings=0;
+    for(const item of collected){
+      const control=byCode[item.controlCode];if(!control)continue;
+      const json=JSON.stringify(item.payload),sha=crypto.createHash("sha256").update(json).digest("hex");
+      await pool.query(`INSERT INTO evidence(organization_id,control_id,integration_id,title,evidence_type,source,period,status,automated,collected_at,expires_at,uploaded_by,sha256,review_status,evidence_payload)
+        VALUES($1,$2,$3,$4,'System Snapshot',$5,to_char(current_date,'YYYY-MM'),'Current',true,now(),now()+interval '30 days',$6,$7,'Pending Review',$8::jsonb)`,[
+        req.user!.orgId,control.id,conn.rows[0].integration_id,item.title,provider,req.user!.id,sha,json
+      ]);created++;
+      if(item.finding){
+        const dup=await pool.query("SELECT id FROM findings WHERE organization_id=$1 AND control_id=$2 AND title=$3 AND status NOT IN ('Closed','Resolved')",[req.user!.orgId,control.id,item.finding.title]);
+        if(!dup.rowCount){
+          await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date)
+            VALUES($1,$2,$3,$4,$5,'Open',$6,current_date+interval '14 days')`,[
+            req.user!.orgId,control.id,item.finding.title,item.finding.description,item.finding.severity,item.finding.owner||control.owner||""
+          ]);findings++;
+        }
+      }
+    }
+    await pool.query("UPDATE integrations SET status='Connected',last_sync_at=now() WHERE id=$1",[conn.rows[0].integration_id]);
+    await pool.query("UPDATE integration_connections SET last_validated_at=now(),last_error=NULL WHERE id=$1",[conn.rows[0].id]);
+    await audit(req.user!,"SYNC","integration",conn.rows[0].integration_id,{provider,evidenceCreated:created,findingsCreated:findings});
+    res.json({provider,evidenceCreated:created,findingsCreated:findings});
+  }catch(err:any){
+    await pool.query("UPDATE integration_connections SET last_error=$2 WHERE id=$1",[conn.rows[0].id,err?.message||"Sync failed"]).catch(()=>{});
+    res.status(400).json({error:err?.message||"Connector sync failed"});
+  }
+});
+
+app.delete("/api/integrations/:provider/connection",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+  const provider=String(req.params.provider||"");if(provider==="github")return res.status(400).json({error:"Use the dedicated GitHub disconnect flow"});
+  const integration=await pool.query("SELECT id FROM integrations WHERE organization_id=$1 AND provider_key=$2",[req.user!.orgId,provider]);
+  await pool.query("DELETE FROM integration_connections WHERE organization_id=$1 AND provider_key=$2",[req.user!.orgId,provider]);
+  if(integration.rowCount)await pool.query("UPDATE integrations SET status='Available',tenant_ref='',last_sync_at=NULL WHERE id=$1",[integration.rows[0].id]);
+  await audit(req.user!,"DISCONNECT","integration",integration.rows[0]?.id||null,{provider});res.json({status:"Available"});
+});
+
 app.get("/api/integrations",auth,permit("integrations.read"),async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT i.*,
-    (SELECT count(*)::int FROM automation_rules a WHERE a.integration_id=i.id) automation_count
+    (SELECT count(*)::int FROM automation_rules a WHERE a.integration_id=i.id) automation_count,
+    EXISTS(SELECT 1 FROM integration_connections c WHERE c.integration_id=i.id AND c.organization_id=i.organization_id) has_connection
     FROM integrations i WHERE i.organization_id=$1 ORDER BY category,name`,[req.user!.orgId]);
-  res.json(q.rows);
+  res.json(q.rows.map((r:any)=>({...r,connector_live:r.provider_key==="github"||liveConnectorKeys.includes(r.provider_key as any),connector_fields:r.provider_key==="github"?null:connectorFields(r.provider_key)})));
 });
 
 app.put("/api/integrations/:id",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
