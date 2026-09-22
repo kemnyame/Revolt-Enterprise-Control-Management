@@ -98,6 +98,23 @@
 
       <div class="metric-grid" id="metricGrid"></div>
 
+      <section class="panel progress-panel" id="progressPanel">
+        <div class="panel-head progress-head">
+          <div><span class="caps">CONTROL WORK PROGRESS</span><h3>Period status by controls and officers</h3><p>Track work completed, in progress, overdue and not started for the selected period.</p></div>
+          <div class="progress-filters">
+            <select id="progressPeriod"><option value="month">This month</option><option value="quarter" selected>This quarter</option><option value="year">This year</option></select>
+            <select id="progressFrequency"><option value="">All frequencies</option><option>Continuous</option><option>Daily</option><option>Weekly</option><option>Monthly</option><option>Quarterly</option><option>Semi-Annual</option><option>Annual</option></select>
+            <select id="progressOfficer"><option value="">All officers</option></select>
+          </div>
+        </div>
+        <div class="progress-summary" id="progressSummary"></div>
+        <div class="two-col progress-grids">
+          <div><span class="caps">BY FREQUENCY</span><div id="progressFrequencyGrid" class="progress-list"></div></div>
+          <div><span class="caps">BY OFFICER</span><div id="progressOfficerGrid" class="progress-list"></div></div>
+        </div>
+        <div class="table-card"><table><thead><tr><th>Control</th><th>Assigned officer</th><th>Frequency</th><th>Risk</th><th>Period status</th><th>Evidence</th><th>Open issues</th><th>Next due</th><th></th></tr></thead><tbody id="progressBody"></tbody></table></div>
+      </section>
+
       <div class="two-col">
         <section class="panel">
           <div class="panel-head"><div><span class="caps">A PRACTICAL STARTING POINT</span><h3>Controls by area</h3></div><button class="text-btn" data-page-link="library">Explore all</button></div>
@@ -125,7 +142,7 @@
         <select id="categoryFilter"><option value="">All control areas</option></select>
         <select id="riskFilter"><option value="">All risk levels</option><option>High</option><option>Medium</option><option>Low</option></select>
       </div>
-      <div class="table-card"><table><thead><tr><th>Control</th><th>Area</th><th>Owner</th><th>Frequency</th><th>Risk</th><th>Latest test</th><th>Evidence</th><th>Findings</th><th></th></tr></thead><tbody id="controlsBody"></tbody></table></div>
+      <div class="table-card"><table><thead><tr><th>Control</th><th>Area</th><th>Assigned officer</th><th>Owner</th><th>Frequency</th><th>Risk</th><th>Latest test</th><th>Evidence</th><th>Findings</th><th></th></tr></thead><tbody id="controlsBody"></tbody></table></div>
     </section>
 
     <section class="page hidden" id="evidencePage">
@@ -159,6 +176,11 @@
       <div class="page-toolbar">
         <div><span class="caps">INTEGRATIONS</span><h1>Connect evidence at the source</h1><p>Connect approved systems, collect structured evidence and keep the source relationship visible to reviewers.</p></div>
       </div>
+      <section class="github-feature os-feature" id="osFeature">
+        <div class="github-mark">OS</div>
+        <div class="github-copy"><span class="caps">CORE PLATFORM CONNECTOR</span><h2>Revolt-X OS</h2><p>Link Enterprise Controls to Core OS organisation, users, roles, structure and audit context without making Controls dependent on OS availability.</p><div id="osConnectionState"></div></div>
+        <div class="github-actions" id="osActions"></div>
+      </section>
       <section class="github-feature" id="githubFeature">
         <div class="github-mark">GH</div>
         <div class="github-copy"><span class="caps">LIVE CONNECTOR</span><h2>GitHub</h2><p>Validate a GitHub credential, select repositories, then collect repository configuration, branch protection, pull-request, workflow, secret-scanning, code-scanning and Dependabot evidence.</p><div id="githubConnectionState"></div></div>
@@ -179,7 +201,8 @@
     </section>
 
     <section class="page hidden" id="auditPage">
-      <div class="page-toolbar"><div><span class="caps">AUDIT TRAIL</span><h1>A recorded chain of actions</h1><p>Review sign-ins, control changes, evidence uploads and reviews, tests, issues, connector events and exports.</p></div><button class="btn outline" id="auditPackBtn">Download audit pack</button></div>
+      <div class="page-toolbar"><div><span class="caps">AUDIT TRAIL</span><h1>A recorded chain of actions</h1><p>Review sign-ins, control changes, evidence uploads and reviews, tests, issues, connector events and exports.</p></div><div class="toolbar-actions"><button class="btn outline" id="auditCsvBtn">Controls CSV</button><button class="btn dark" id="auditPackBtn">Full audit pack</button></div></div>
+      <div class="filters audit-filters"><input id="auditSearch" placeholder="Search user, action, entity or details"/><select id="auditAction"><option value="">All actions</option></select><select id="auditEntity"><option value="">All entities</option></select></div>
       <div class="table-card"><table><thead><tr><th>Date & time</th><th>User</th><th>Action</th><th>Entity</th><th>Reference</th><th>Details</th></tr></thead><tbody id="auditBody"></tbody></table></div>
     </section>
 
@@ -204,7 +227,7 @@
           </form>
         </section>
       </div>
-      <div class="role-strip"><span><b>Admin</b> Full workspace management</span><span><b>Control Manager</b> Controls, evidence and testing</span><span><b>Auditor</b> Testing and evidence review</span><span><b>Reviewer</b> Oversight and remediation</span><span><b>Viewer</b> Read-only access</span></div>
+      <div class="role-strip"><span><b>Admin</b> Full workspace management</span><span><b>Control Manager</b> Controls, team progress and oversight</span><span><b>Control Officer</b> Assigned controls, evidence and testing</span><span><b>Auditor</b> Testing and evidence review</span><span><b>Reviewer</b> Oversight and remediation</span><span><b>Viewer</b> Read-only access</span></div>
       <div class="table-card" data-permission="users.read"><table><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody id="usersBody"></tbody></table></div>
     </section>
 
