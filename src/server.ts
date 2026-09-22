@@ -88,7 +88,7 @@ async function githubApi(pathname:string,token:string){
 const permissions: Record<string,string[]> = {
   admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write","settings.read","settings.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
   control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","integrations.read","automation.read","automation.write","reports.read"],
-  control_officer:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","integrations.read","automation.read","reports.read"],
+  control_officer:["dashboard.read","controls.read","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","integrations.read","automation.read","reports.read"],
   auditor:["dashboard.read","controls.read","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   reviewer:["dashboard.read","controls.read","assessments.read","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","integrations.read","automation.read","reports.read"]
@@ -118,6 +118,13 @@ async function audit(user:TokenPayload, action:string, entityType:string, entity
     [user.orgId,user.id,action,entityType,entityId,JSON.stringify(details)]
   );
 }
+
+async function hasControlAccess(user:TokenPayload,controlId:number){
+  const officer=user.role==="control_officer";
+  const q=await pool.query("SELECT 1 FROM controls WHERE id=$1 AND organization_id=$2 AND ($3::boolean=false OR assigned_user_id=$4)",[controlId,user.orgId,officer,user.id]);
+  return Boolean(q.rowCount);
+}
+
 
 async function initDb(){
   await pool.query(`
@@ -530,13 +537,14 @@ app.get("/api/controls",auth,permit("controls.read"),async(req:AuthedRequest,res
     FROM controls c LEFT JOIN users au ON au.id=c.assigned_user_id WHERE c.organization_id=$1
     AND ($2='' OR c.title ILIKE '%'||$2||'%' OR c.control_code ILIKE '%'||$2||'%')
     AND ($3='' OR c.category=$3) AND ($4='' OR c.risk_level=$4)
-    ORDER BY c.control_code`,[req.user!.orgId,search,category,risk]);
+    AND ($5::boolean=false OR c.assigned_user_id=$6)
+    ORDER BY c.control_code`,[req.user!.orgId,search,category,risk,req.user!.role==="control_officer",req.user!.id]);
   res.json(out.rows);
 });
 
 app.get("/api/controls/:id",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
-  const control=await pool.query("SELECT c.*,u.name assigned_user_name,u.email assigned_user_email FROM controls c LEFT JOIN users u ON u.id=c.assigned_user_id WHERE c.id=$1 AND c.organization_id=$2",[id,req.user!.orgId]);
+  const control=await pool.query("SELECT c.*,u.name assigned_user_name,u.email assigned_user_email FROM controls c LEFT JOIN users u ON u.id=c.assigned_user_id WHERE c.id=$1 AND c.organization_id=$2 AND ($3::boolean=false OR c.assigned_user_id=$4)",[id,req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
   if(!control.rowCount) return res.status(404).json({error:"Control not found"});
   const [evidence,tests,findings]=await Promise.all([
     pool.query(`SELECT e.*,u.name uploaded_by_name,rv.name reviewed_by_name FROM evidence e
@@ -570,8 +578,8 @@ app.post("/api/controls/:id/test",auth,permit("assessments.write"),async(req:Aut
     retest_of:z.number().int().nullable().optional()
   });
   const p=schema.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Complete the required testing fields",details:p.error.flatten()});
-  const ctrl=await pool.query("SELECT * FROM controls WHERE id=$1 AND organization_id=$2",[controlId,req.user!.orgId]);
-  if(!ctrl.rowCount) return res.status(404).json({error:"Control not found"});
+  const ctrl=await pool.query("SELECT * FROM controls WHERE id=$1 AND organization_id=$2 AND ($3::boolean=false OR assigned_user_id=$4)",[controlId,req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
+  if(!ctrl.rowCount) return res.status(404).json({error:"Control not found or not assigned to you"});
   if(p.data.evidence_ids.length){
     const ev=await pool.query("SELECT id FROM evidence WHERE organization_id=$1 AND control_id=$2 AND id=ANY($3::int[])",[req.user!.orgId,controlId,p.data.evidence_ids]);
     if(ev.rowCount!==p.data.evidence_ids.length) return res.status(400).json({error:"One or more selected evidence items do not belong to this control"});
@@ -615,14 +623,14 @@ app.put("/api/controls/:id",auth,permit("controls.write"),async(req:AuthedReques
 
 app.get("/api/assessments",auth,permit("assessments.read"),async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT a.*,c.control_code,c.title control_title,u.name tester_name FROM assessments a
-    JOIN controls c ON c.id=a.control_id LEFT JOIN users u ON u.id=a.tester_id WHERE a.organization_id=$1 ORDER BY a.tested_at DESC`,[req.user!.orgId]);
+    JOIN controls c ON c.id=a.control_id LEFT JOIN users u ON u.id=a.tester_id WHERE a.organization_id=$1 AND ($2::boolean=false OR c.assigned_user_id=$3) ORDER BY a.tested_at DESC`,[req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
   res.json(q.rows);
 });
 
 app.post("/api/assessments",auth,permit("assessments.write"),async(req:AuthedRequest,res)=>{
   const s=z.object({control_id:z.number().int(),period:z.string().min(2),result:z.enum(["Effective","Partially Effective","Ineffective","Not Tested"]),score:z.number().int().min(0).max(100).optional(),notes:z.string().default("")});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid assessment data",details:p.error.flatten()});
-  const c=await pool.query("SELECT id FROM controls WHERE id=$1 AND organization_id=$2",[p.data.control_id,req.user!.orgId]); if(!c.rowCount) return res.status(404).json({error:"Control not found"});
+  if(!(await hasControlAccess(req.user!,p.data.control_id))) return res.status(404).json({error:"Control not found or not assigned to you"});
   const q=await pool.query(`INSERT INTO assessments(organization_id,control_id,tester_id,period,result,score,notes) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
     [req.user!.orgId,p.data.control_id,req.user!.id,p.data.period,p.data.result,p.data.score??null,p.data.notes]);
   await pool.query("UPDATE controls SET last_tested=current_date,next_due=current_date + interval '90 days',updated_at=now() WHERE id=$1",[p.data.control_id]);
@@ -633,8 +641,7 @@ app.post("/api/evidence/upload",auth,permit("evidence.write"),upload.single("fil
   if(!req.file) return res.status(400).json({error:"Choose a file to upload"});
   const controlId=Number(req.body.control_id);
   if(!Number.isInteger(controlId)) return res.status(400).json({error:"Select a control"});
-  const ctrl=await pool.query("SELECT id FROM controls WHERE id=$1 AND organization_id=$2",[controlId,req.user!.orgId]);
-  if(!ctrl.rowCount) return res.status(404).json({error:"Control not found"});
+  if(!(await hasControlAccess(req.user!,controlId))) return res.status(404).json({error:"Control not found or not assigned to you"});
   const sha=crypto.createHash("sha256").update(req.file.buffer).digest("hex");
   const f=await pool.query(`INSERT INTO evidence_files(organization_id,original_name,mime_type,size_bytes,sha256,content,uploaded_by)
     VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,original_name,mime_type,size_bytes,sha256,created_at`,[
@@ -691,13 +698,13 @@ app.post("/api/assessments/:id/review",auth,permit("assessments.review"),async(r
 
 app.get("/api/evidence",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT e.*,c.control_code,c.title control_title,u.name uploaded_by_name FROM evidence e
-    JOIN controls c ON c.id=e.control_id LEFT JOIN users u ON u.id=e.uploaded_by WHERE e.organization_id=$1 ORDER BY e.created_at DESC`,[req.user!.orgId]); res.json(q.rows);
+    JOIN controls c ON c.id=e.control_id LEFT JOIN users u ON u.id=e.uploaded_by WHERE e.organization_id=$1 AND ($2::boolean=false OR c.assigned_user_id=$3) ORDER BY e.created_at DESC`,[req.user!.orgId,req.user!.role==="control_officer",req.user!.id]); res.json(q.rows);
 });
 
 app.post("/api/evidence",auth,permit("evidence.write"),async(req:AuthedRequest,res)=>{
   const s=z.object({control_id:z.number().int(),assessment_id:z.number().int().nullable().optional(),title:z.string().min(2),evidence_type:z.string().default("Document"),source:z.string().default("Manual Upload"),url:z.string().default(""),period:z.string().default(""),status:z.string().default("Current")});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid evidence data",details:p.error.flatten()});
-  const c=await pool.query("SELECT id FROM controls WHERE id=$1 AND organization_id=$2",[p.data.control_id,req.user!.orgId]); if(!c.rowCount) return res.status(404).json({error:"Control not found"});
+  if(!(await hasControlAccess(req.user!,p.data.control_id))) return res.status(404).json({error:"Control not found or not assigned to you"});
   const d=p.data; const q=await pool.query(`INSERT INTO evidence(organization_id,control_id,assessment_id,title,evidence_type,source,url,period,status,uploaded_by)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,[req.user!.orgId,d.control_id,d.assessment_id??null,d.title,d.evidence_type,d.source,d.url,d.period,d.status,req.user!.id]);
   await audit(req.user!,"ADD_EVIDENCE","control",d.control_id,{evidenceId:q.rows[0].id,title:d.title}); res.status(201).json(q.rows[0]);
@@ -705,7 +712,7 @@ app.post("/api/evidence",auth,permit("evidence.write"),async(req:AuthedRequest,r
 
 app.get("/api/findings",auth,permit("findings.read"),async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT f.*,c.control_code,c.title control_title FROM findings f LEFT JOIN controls c ON c.id=f.control_id
-    WHERE f.organization_id=$1 ORDER BY CASE f.severity WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END,f.created_at DESC`,[req.user!.orgId]); res.json(q.rows);
+    WHERE f.organization_id=$1 AND ($2::boolean=false OR c.assigned_user_id=$3) ORDER BY CASE f.severity WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END,f.created_at DESC`,[req.user!.orgId,req.user!.role==="control_officer",req.user!.id]); res.json(q.rows);
 });
 
 app.post("/api/findings",auth,permit("findings.write"),async(req:AuthedRequest,res)=>{
@@ -713,8 +720,7 @@ app.post("/api/findings",auth,permit("findings.write"),async(req:AuthedRequest,r
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Please check the finding fields",details:p.error.flatten()});
   const d=p.data;
   if(d.control_id){
-    const ctrl=await pool.query("SELECT id FROM controls WHERE id=$1 AND organization_id=$2",[d.control_id,req.user!.orgId]);
-    if(!ctrl.rowCount)return res.status(400).json({error:"The selected control does not belong to this workspace"});
+    if(!(await hasControlAccess(req.user!,d.control_id)))return res.status(400).json({error:"The selected control is unavailable or not assigned to you"});
   }
   try{
     const q=await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date,updated_at)
@@ -727,7 +733,7 @@ app.post("/api/findings",auth,permit("findings.write"),async(req:AuthedRequest,r
 app.put("/api/findings/:id",auth,permit("findings.write"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id); const s=z.object({status:z.string(),owner:z.string().optional(),due_date:z.string().nullable().optional(),description:z.string().optional()}); const p=s.safeParse(req.body);
   if(!p.success) return res.status(400).json({error:"Invalid update"});
-  const existing=await pool.query("SELECT * FROM findings WHERE id=$1 AND organization_id=$2",[id,req.user!.orgId]);
+  const existing=await pool.query(`SELECT f.* FROM findings f LEFT JOIN controls c ON c.id=f.control_id WHERE f.id=$1 AND f.organization_id=$2 AND ($3::boolean=false OR c.assigned_user_id=$4)`,[id,req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
   if(!existing.rowCount) return res.status(404).json({error:"Finding not found"});
   const d=p.data;
   if(["Closed","Resolved"].includes(d.status)){
