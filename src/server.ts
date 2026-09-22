@@ -2,6 +2,7 @@ import "dotenv/config";
 import express, { NextFunction, Request, Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { Pool } from "pg";
@@ -19,13 +20,43 @@ const port = Number(process.env.PORT || 10000);
 const jwtSecret = process.env.JWT_SECRET || (process.env.NODE_ENV === "production" ? "" : "dev-only-change-me");
 if (!jwtSecret) throw new Error("JWT_SECRET is required in production");
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized:false } : undefined
-});
+const databaseUrl=process.env.DATABASE_URL || "";
+if(!databaseUrl) throw new Error("DATABASE_URL is required");
+const effectiveDatabaseUrl=process.env.NODE_ENV==="production" ? (()=>{const u=new URL(databaseUrl);u.searchParams.set("sslmode","verify-full");return u.toString()})() : databaseUrl;
+const pool = new Pool({ connectionString: effectiveDatabaseUrl });
 
-app.use(helmet({ contentSecurityPolicy:false }));
-app.use(cors());
+const allowedOrigins=(process.env.ALLOWED_ORIGINS || "").split(",").map(x=>x.trim()).filter(Boolean);
+if(process.env.NODE_ENV==="production" && !allowedOrigins.length) throw new Error("ALLOWED_ORIGINS is required in production");
+app.set("trust proxy",1);
+app.use(helmet({
+  contentSecurityPolicy:{
+    directives:{
+      defaultSrc:["'self'"],
+      scriptSrc:["'self'"],
+      styleSrc:["'self'","https://fonts.googleapis.com"],
+      fontSrc:["'self'","https://fonts.gstatic.com","data:"],
+      imgSrc:["'self'","data:"],
+      connectSrc:["'self'"],
+      objectSrc:["'none'"],
+      frameAncestors:["'none'"],
+      baseUri:["'self'"],
+      formAction:["'self'"]
+    }
+  },
+  referrerPolicy:{policy:"strict-origin-when-cross-origin"}
+}));
+app.use(cors({
+  origin:(origin,callback)=>{
+    if(!origin || process.env.NODE_ENV!=="production" || allowedOrigins.includes(origin)) return callback(null,true);
+    callback(new Error("Origin not allowed"));
+  },
+  methods:["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders:["Content-Type","Authorization"]
+}));
+const apiLimiter=rateLimit({windowMs:15*60*1000,limit:600,standardHeaders:"draft-8",legacyHeaders:false});
+const loginLimiter=rateLimit({windowMs:15*60*1000,limit:12,standardHeaders:"draft-8",legacyHeaders:false,skipSuccessfulRequests:true});
+app.use("/api",apiLimiter);
+app.use("/api/auth/login",loginLimiter);
 app.use(express.json({ limit:"3mb" }));
 const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:8*1024*1024}});
 const integrationKey=crypto.createHash("sha256").update(process.env.INTEGRATION_ENCRYPTION_KEY || (process.env.NODE_ENV==="production" ? "" : "dev-integration-key")).digest();
