@@ -90,13 +90,15 @@ function renderControls(){
   $$("[data-test-control]").forEach(b=>b.onclick=()=>openTestControl(Number(b.dataset.testControl)));
 }
 function renderEvidence(){
-  $("#evidenceGrid").innerHTML=state.evidence.length?state.evidence.map(e=>'<article class="evidence-card"><div class="evidence-card-head"><span class="doc-icon">'+(e.file_id?"FILE":"SRC")+'</span>'+tag(e.review_status||e.status)+'</div><h3>'+esc(e.title)+'</h3><p>'+esc(e.control_code)+" · "+esc(e.control_title)+'</p><div class="evidence-meta"><div><small>SOURCE</small><b>'+esc(e.source)+'</b></div><div><small>PERIOD</small><b>'+esc(e.period||"—")+'</b></div><div><small>COLLECTED</small><b>'+fmtDate(e.collected_at||e.created_at)+'</b></div><div><small>TYPE</small><b>'+esc(e.evidence_type)+'</b></div></div>'+(e.sha256?'<div class="fingerprint">SHA-256 '+esc(e.sha256)+'</div>':'')+'<div class="evidence-actions">'+(e.file_id?'<button class="action-btn" data-download-file="'+e.file_id+'">Download source</button>':'')+(e.url?'<button class="action-btn" data-open-url="'+esc(e.url)+'">Open source</button>':'')+(has("evidence.write")?'<button class="action-btn dark" data-review-evidence="'+e.id+'">Review</button>':'')+'</div></article>').join(""):'<div class="empty-state">No evidence has been added yet.</div>';
-  $$("[data-download-file]").forEach(b=>b.onclick=()=>downloadEvidence(Number(b.dataset.downloadFile)));
-  $$("[data-open-url]").forEach(b=>b.onclick=()=>window.open(b.dataset.openUrl,"_blank","noopener"));
-  $$("[data-review-evidence]").forEach(b=>b.onclick=()=>reviewEvidence(Number(b.dataset.reviewEvidence)));
+  $("#evidenceGrid").innerHTML=state.evidence.length?state.evidence.map(e=>'<article class="evidence-card"><div class="evidence-card-head"><span class="doc-icon">'+(e.file_id?"FILE":"SRC")+'</span>'+tag(e.review_status||e.status)+'</div><h3>'+esc(e.title)+'</h3><p>'+esc(e.control_code)+" · "+esc(e.control_title)+'</p><div class="evidence-meta"><div><small>SOURCE</small><b>'+esc(e.source)+'</b></div><div><small>PERIOD</small><b>'+esc(e.period||"—")+'</b></div><div><small>COLLECTED</small><b>'+fmtDate(e.collected_at||e.created_at)+'</b></div><div><small>TYPE</small><b>'+esc(e.evidence_type)+'</b></div></div>'+(e.sha256?'<div class="fingerprint">SHA-256 '+esc(e.sha256)+'</div>':'')+'<div class="evidence-actions">'+(e.file_id?'<button class="action-btn" data-download-file="'+e.file_id+'">Download source</button><button class="action-btn" data-verify-evidence="'+e.id+'">Verify integrity</button>':'')+(e.url?'<button class="action-btn" data-open-url="'+esc(e.url)+'">Open source</button>':'')+(has("evidence.write")?'<button class="action-btn dark" data-review-evidence="'+e.id+'">Review</button>':'')+'</div></article>').join(""):'<div class="empty-state">No evidence has been added yet.</div>';
+  $("[data-download-file]").forEach(b=>b.onclick=()=>downloadEvidence(Number(b.dataset.downloadFile)));
+  $("[data-verify-evidence]").forEach(b=>b.onclick=()=>verifyEvidence(Number(b.dataset.verifyEvidence)));
+  $("[data-open-url]").forEach(b=>b.onclick=()=>window.open(b.dataset.openUrl,"_blank","noopener"));
+  $("[data-review-evidence]").forEach(b=>b.onclick=()=>reviewEvidence(Number(b.dataset.reviewEvidence)));
 }
 function renderAssessments(){
-  $("#assessmentsBody").innerHTML=state.assessments.length?state.assessments.map(a=>'<tr><td class="control-name"><b>'+esc(a.control_code)+" · "+esc(a.control_title)+'</b></td><td>'+esc(a.period)+'</td><td>'+tag(a.result)+'</td><td><b>'+esc(a.score??"—")+(a.score!=null?"%":"")+'</b></td><td>'+esc(a.tester_name||"—")+'</td><td>'+tag(a.review_status)+'</td><td>'+fmtDate(a.tested_at)+'</td></tr>').join(""):'<tr><td colspan="7" class="empty-state">No control tests recorded.</td></tr>';
+  $("#assessmentsBody").innerHTML=state.assessments.length?state.assessments.map(a=>'<tr><td class="control-name"><b>'+esc(a.control_code)+" · "+esc(a.control_title)+'</b></td><td>'+esc(a.period)+'</td><td>'+tag(a.result)+'</td><td><b>'+esc(a.score??"—")+(a.score!=null?"%":"")+'</b></td><td>'+esc(a.tester_name||"—")+'</td><td>'+tag(a.review_status)+'</td><td>'+fmtDate(a.tested_at)+'</td><td>'+(has("assessments.review")?'<button class="action-btn" data-review-test="'+a.id+'">Review</button>':'')+'</td></tr>').join(""):'<tr><td colspan="8" class="empty-state">No control tests recorded.</td></tr>';
+  $("[data-review-test]").forEach(b=>b.onclick=()=>reviewAssessment(Number(b.dataset.reviewTest)));
 }
 function renderFindings(){
   const cols=[["Open",x=>x.status==="Open"],["In Progress",x=>["In Progress","Remediation"].includes(x.status)],["Closed",x=>["Closed","Resolved"].includes(x.status)]];
@@ -156,7 +158,12 @@ function renderAudit(){
   $("#auditBody").innerHTML=state.audit.length?state.audit.map(a=>'<tr><td>'+fmtTime(a.created_at)+'</td><td class="control-name"><b>'+esc(a.user_name||"System")+'</b><span>'+esc(a.email||"")+'</span></td><td><b>'+esc(a.action)+'</b></td><td>'+esc(a.entity_type)+'</td><td>'+esc(a.entity_id??"—")+'</td><td>'+esc(JSON.stringify(a.details||{}).slice(0,120))+'</td></tr>').join(""):'<tr><td colspan="6" class="empty-state">No audit activity available.</td></tr>';
 }
 function renderUsers(){
-  $("#usersBody").innerHTML=state.users.length?state.users.map(u=>'<tr><td class="control-name"><b>'+esc(u.name)+'</b></td><td>'+esc(u.email)+'</td><td>'+tag(humanRole(u.role))+'</td><td>'+tag(u.status)+'</td><td>'+fmtDate(u.created_at)+'</td></tr>').join(""):'<tr><td colspan="5" class="empty-state">No users available.</td></tr>';
+  $("#usersBody").innerHTML=state.users.length?state.users.map(u=>'<tr><td class="control-name"><b>'+esc(u.name)+'</b></td><td>'+esc(u.email)+'</td><td>'+tag(humanRole(u.role))+'</td><td>'+tag(u.status)+'</td><td>'+fmtDate(u.created_at)+'</td><td>'+(has("users.write")&&u.id!==state.user?.id?'<button class="action-btn" data-user-status="'+u.id+'" data-next-status="'+(u.status==="active"?"disabled":"active")+'">'+(u.status==="active"?"Disable":"Enable")+'</button>':'')+'</td></tr>').join(""):'<tr><td colspan="6" class="empty-state">No users available.</td></tr>';
+  $("[data-user-status]").forEach(b=>b.onclick=()=>setUserStatus(Number(b.dataset.userStatus),b.dataset.nextStatus));
+}
+function renderSettings(){
+  if(!state.organization||!$("#orgSettingsForm"))return;
+  const f=$("#orgSettingsForm");["name","industry","country","timezone","contact_email"].forEach(k=>{if(f.elements[k])f.elements[k].value=state.organization[k]||""});
 }
 function populateFilters(){
   const cats=[...new Set(state.controls.map(c=>c.category))].sort();
