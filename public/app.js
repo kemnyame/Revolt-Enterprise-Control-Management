@@ -59,7 +59,7 @@ async function refresh(parts=["dashboard","controls","evidence","assessments","f
 function go(page){
   state.page=page;$$(".page").forEach(x=>x.classList.add("hidden"));$("#"+page+"Page")?.classList.remove("hidden");
   $$("[data-page]").forEach(b=>b.classList.toggle("active",b.dataset.page===page));
-  const titles={overview:"IT controls overview",controls:"Control register",evidence:"Evidence vault",assessments:"Testing & assurance",findings:"Issues & remediation",integrations:"Integrations",library:"Control library",audit:"Audit trail",users:"Settings & team",manual:"User manual",reports:"Control health",controlDetail:"Control record"};
+  const titles={overview:"IT controls overview",controls:"Control register",evidence:"Evidence vault",assessments:"Testing & assurance",findings:"Issues & remediation",integrations:"Integrations",library:"Control library",audit:"Audit trail",settings:"Settings & team",users:"Settings & team",manual:"User manual",reports:"Control health",controlDetail:"Control record"};
   $("#pageTitle").textContent=titles[page]||"IT Controls";$(".sidebar").classList.remove("open");window.scrollTo(0,0);
 }
 function renderAll(){renderDashboard();renderControls();renderEvidence();renderAssessments();renderFindings();renderIntegrations();renderAutomation();renderLibrary();renderReports();renderAudit();renderUsers();renderSettings();populateFilters();renderManual("start")}
