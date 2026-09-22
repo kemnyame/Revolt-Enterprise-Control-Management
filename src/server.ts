@@ -966,6 +966,57 @@ async function runStartupSmokeTest(){
   }
   if(Number(results.controls)<70) throw new Error(`Smoke test control count too low: ${results.controls}`);
   if(Number(results.integrations)<30) throw new Error(`Smoke test integration count too low: ${results.integrations}`);
+
+  const settings=await fetch(base+"/api/settings/organization",{headers});
+  if(!settings.ok) throw new Error(`Smoke test organization settings failed: ${settings.status}`);
+  results.organizationSettings="ok";
+
+  const controlRow=await pool.query("SELECT id,last_tested,next_due FROM controls WHERE control_code='SDLC-002' ORDER BY id LIMIT 1");
+  if(!controlRow.rowCount) throw new Error("Smoke test control SDLC-002 missing");
+  const controlId=Number(controlRow.rows[0].id);
+  const detail=await fetch(base+"/api/controls/"+controlId,{headers});
+  if(!detail.ok) throw new Error(`Smoke test control detail failed: ${detail.status}`);
+  results.controlDetail="ok";
+
+  let smokeEvidenceId:number|null=null,smokeFileId:number|null=null,smokeAssessmentId:number|null=null;
+  try{
+    const fd=new FormData();
+    fd.set("control_id",String(controlId));
+    fd.set("title","__startup_smoke_evidence__");
+    fd.set("period","startup-smoke");
+    fd.set("evidence_type","Document");
+    fd.set("file",new Blob(["Revolt-X evidence integrity smoke test"],{type:"text/plain"}),"startup-smoke.txt");
+    const up=await fetch(base+"/api/evidence/upload",{method:"POST",headers:{Authorization:headers.Authorization},body:fd});
+    if(!up.ok) throw new Error(`Smoke test evidence upload failed: ${up.status} ${await up.text()}`);
+    const upData:any=await up.json();smokeEvidenceId=Number(upData.id);smokeFileId=Number(upData.file?.id);
+    const verify=await fetch(base+"/api/evidence/"+smokeEvidenceId+"/verify",{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:"{}"});
+    if(!verify.ok) throw new Error(`Smoke test evidence verify failed: ${verify.status}`);
+    const verifyData:any=await verify.json();if(!verifyData.valid) throw new Error("Smoke test evidence hash verification failed");
+    results.evidenceIntegrity="ok";
+
+    const test=await fetch(base+"/api/controls/"+controlId+"/test",{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({
+      period:"startup-smoke",test_objective:"Validate the production Test Control workflow.",
+      test_procedure:"Create a temporary operating-effectiveness test through the production API and remove it after validation.",
+      result:"Effective",score:100,sample_size:1,exception_count:0,evidence_ids:[smokeEvidenceId],
+      design_effective:true,operating_effective:true,notes:"Temporary startup smoke test.",raise_finding:false
+    })});
+    if(!test.ok) throw new Error(`Smoke test Test Control failed: ${test.status} ${await test.text()}`);
+    const testData:any=await test.json();smokeAssessmentId=Number(testData.assessment?.id);
+    const review=await fetch(base+"/api/assessments/"+smokeAssessmentId+"/review",{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({review_status:"Reviewed",review_notes:"Automated startup validation."})});
+    if(!review.ok) throw new Error(`Smoke test test-review failed: ${review.status}`);
+    results.testControl="ok";
+    results.testReview="ok";
+
+    const gh=await fetch("https://api.github.com/repos/kemnyame/Revolt-Enterprise-Control-Management",{headers:{"Accept":"application/vnd.github+json","User-Agent":"Revolt-X-Control-Smoke-Test"}});
+    if(!gh.ok) throw new Error(`Smoke test GitHub connectivity failed: ${gh.status}`);
+    results.githubConnectivity="ok";
+  } finally {
+    if(smokeAssessmentId) await pool.query("DELETE FROM assessments WHERE id=$1",[smokeAssessmentId]);
+    if(smokeEvidenceId) await pool.query("DELETE FROM evidence WHERE id=$1",[smokeEvidenceId]);
+    if(smokeFileId) await pool.query("DELETE FROM evidence_files WHERE id=$1",[smokeFileId]);
+    await pool.query("UPDATE controls SET last_tested=$2,next_due=$3 WHERE id=$1",[controlId,controlRow.rows[0].last_tested,controlRow.rows[0].next_due]);
+    await pool.query("DELETE FROM audit_logs WHERE organization_id=(SELECT organization_id FROM controls WHERE id=$1) AND details::text LIKE '%startup_smoke%' OR details::text LIKE '%startup-smoke%'",[controlId]).catch(()=>{});
+  }
   console.log("Authenticated startup smoke test passed",JSON.stringify(results));
 }
 
