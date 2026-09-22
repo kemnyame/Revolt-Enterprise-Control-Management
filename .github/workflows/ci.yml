@@ -15,3 +15,21 @@ jobs:
           node-version: 20
       - run: npm install
       - run: npm run build
+      - name: Prepare clean source export
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p export
+          rsync -a \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.env' \
+            --exclude='export' \
+            ./ export/
+      - name: Upload source build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Revolt-Enterprise-Control-Management-Latest
+          path: export/
+          if-no-files-found: error
+          retention-days: 7
