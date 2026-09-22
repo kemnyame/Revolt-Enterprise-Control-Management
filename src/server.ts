@@ -7,6 +7,7 @@ import jwt from "jsonwebtoken";
 import { Pool } from "pg";
 import { z } from "zod";
 import path from "path";
+import { controlCatalog, integrationCatalog } from "./seed";
 
 type TokenPayload = { id:number; orgId:number; role:string; email:string; name:string };
 type AuthedRequest = Request & { user?: TokenPayload };
@@ -26,11 +27,11 @@ app.use(cors());
 app.use(express.json({ limit:"2mb" }));
 
 const permissions: Record<string,string[]> = {
-  admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write"],
-  control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read"],
-  auditor:["dashboard.read","controls.read","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read"],
-  reviewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","findings.write","audit.read"],
-  viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read"]
+  admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
+  control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","automation.write","reports.read"],
+  auditor:["dashboard.read","controls.read","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
+  reviewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
+  viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","integrations.read","automation.read","reports.read"]
 };
 
 function auth(req:AuthedRequest,res:Response,next:NextFunction){
@@ -107,17 +108,36 @@ async function initDb(){
       review_status TEXT NOT NULL DEFAULT 'Pending Review',
       tested_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    CREATE TABLE IF NOT EXISTS integrations(
+      id SERIAL PRIMARY KEY,
+      organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      provider_key TEXT NOT NULL,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      auth_type TEXT NOT NULL,
+      capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+      status TEXT NOT NULL DEFAULT 'Available',
+      base_url TEXT NOT NULL DEFAULT '',
+      tenant_ref TEXT NOT NULL DEFAULT '',
+      last_sync_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(organization_id,provider_key)
+    );
     CREATE TABLE IF NOT EXISTS evidence(
       id SERIAL PRIMARY KEY,
       organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
       control_id INTEGER NOT NULL REFERENCES controls(id) ON DELETE CASCADE,
       assessment_id INTEGER REFERENCES assessments(id) ON DELETE SET NULL,
+      integration_id INTEGER REFERENCES integrations(id) ON DELETE SET NULL,
       title TEXT NOT NULL,
       evidence_type TEXT NOT NULL DEFAULT 'Document',
       source TEXT NOT NULL DEFAULT 'Manual Upload',
       url TEXT NOT NULL DEFAULT '',
       period TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'Current',
+      automated BOOLEAN NOT NULL DEFAULT false,
+      collected_at TIMESTAMPTZ,
+      expires_at TIMESTAMPTZ,
       uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
@@ -134,6 +154,19 @@ async function initDb(){
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       resolved_at TIMESTAMPTZ
     );
+    CREATE TABLE IF NOT EXISTS automation_rules(
+      id SERIAL PRIMARY KEY,
+      organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      control_id INTEGER NOT NULL REFERENCES controls(id) ON DELETE CASCADE,
+      integration_id INTEGER NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      schedule TEXT NOT NULL DEFAULT 'Daily',
+      evidence_type TEXT NOT NULL DEFAULT 'System Report',
+      status TEXT NOT NULL DEFAULT 'Ready',
+      last_run_at TIMESTAMPTZ,
+      last_result TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
     CREATE TABLE IF NOT EXISTS audit_logs(
       id BIGSERIAL PRIMARY KEY,
       organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -148,17 +181,19 @@ async function initDb(){
     CREATE INDEX IF NOT EXISTS idx_assessments_org ON assessments(organization_id);
     CREATE INDEX IF NOT EXISTS idx_evidence_org ON evidence(organization_id);
     CREATE INDEX IF NOT EXISTS idx_findings_org ON findings(organization_id);
+    CREATE INDEX IF NOT EXISTS idx_integrations_org ON integrations(organization_id);
+    CREATE INDEX IF NOT EXISTS idx_automation_org ON automation_rules(organization_id);
     CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_logs(organization_id);
   `);
 
   const adminEmail = process.env.ADMIN_EMAIL || (process.env.NODE_ENV !== "production" ? "admin@revoltx.local" : "");
   const adminPassword = process.env.ADMIN_PASSWORD || (process.env.NODE_ENV !== "production" ? "ChangeMe!234" : "");
-  if(!adminEmail || !adminPassword) return;
+  if(!adminEmail || !adminPassword) throw new Error("ADMIN_EMAIL and ADMIN_PASSWORD are required");
 
   let org = await pool.query("SELECT id FROM organizations WHERE slug='revolt-demo'");
   let orgId:number;
   if(!org.rowCount){
-    const created=await pool.query("INSERT INTO organizations(name,slug) VALUES($1,$2) RETURNING id",["Revolt-X Demo Organisation","revolt-demo"]);
+    const created=await pool.query("INSERT INTO organizations(name,slug) VALUES($1,$2) RETURNING id",["Revolt-X Enterprise Demo","revolt-demo"]);
     orgId=created.rows[0].id;
   } else orgId=org.rows[0].id;
 
@@ -170,63 +205,99 @@ async function initDb(){
     ]);
   }
 
-  const count=await pool.query("SELECT count(*)::int AS count FROM controls WHERE organization_id=$1",[orgId]);
-  if(Number(count.rows[0].count)===0){
-    const seed=[
-      ["ITGC-001","Privileged Access Review","Privileged access is reviewed and approved periodically.","Access Management","ISO 27001 A.5.18 / COBIT DSS05","Head of IT","Quarterly","High","User listing, reviewer sign-off and removal evidence"],
-      ["ITGC-002","User Access Provisioning","New system access requires documented approval before provisioning.","Access Management","ISO 27001 A.5.15","IT Security","Continuous","High","Approved request and provisioning record"],
-      ["ITGC-003","Terminated User Deprovisioning","Access for terminated personnel is removed within the defined SLA.","Access Management","ISO 27001 A.5.18","IT Security","Monthly","High","HR leaver list and disabled-account evidence"],
-      ["ITGC-004","Change Management Approval","Production changes are tested, approved and traceable before release.","Change Management","COBIT BAI06","Applications Manager","Continuous","High","Change ticket, test results and approval"],
-      ["ITGC-005","Emergency Change Review","Emergency changes receive retrospective approval and review.","Change Management","COBIT BAI06","Applications Manager","Monthly","Medium","Emergency change ticket and retrospective approval"],
-      ["ITGC-006","Backup Completion Monitoring","Scheduled backups are monitored and failures are resolved.","IT Operations","ISO 27001 A.8.13","Infrastructure Manager","Daily","High","Backup job logs and exception resolution"],
-      ["ITGC-007","Restore Testing","Critical system backups are periodically restored to verify recoverability.","Business Continuity","ISO 27001 A.8.13","Infrastructure Manager","Quarterly","High","Restore test report and screenshots"],
-      ["ITGC-008","Vulnerability Remediation","Critical vulnerabilities are remediated within approved timelines.","Cybersecurity","ISO 27001 A.8.8","Security Manager","Monthly","High","Scanner report and remediation evidence"],
-      ["ITGC-009","Security Log Monitoring","Security-relevant logs are centrally collected and reviewed.","Monitoring","ISO 27001 A.8.15","SOC Lead","Daily","High","SIEM alerts, review logs and incident references"],
-      ["ITGC-010","Firewall Rule Review","Firewall rules are periodically reviewed for business need and least privilege.","Network Security","ISO 27001 A.8.20","Network Manager","Quarterly","Medium","Rule export and signed review"],
-      ["ITGC-011","Patch Compliance Monitoring","Servers and endpoints are assessed against approved patching thresholds.","IT Operations","ISO 27001 A.8.8","Infrastructure Manager","Monthly","Medium","Patch compliance report"],
-      ["ITGC-012","Database Privileged Activity Review","Privileged database activity is monitored for inappropriate actions.","Database Security","COBIT DSS05","Database Administrator","Monthly","High","DB audit extract and reviewer sign-off"]
-    ];
-    for(const row of seed){
-      await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,frequency,risk_level,evidence_required,next_due)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,current_date + interval '30 days')`,[orgId,...row]);
-    }
+  for(const item of controlCatalog){
+    await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,frequency,risk_level,evidence_required,next_due)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,current_date + interval '30 days')
+      ON CONFLICT(organization_id,control_code) DO UPDATE SET title=excluded.title,description=excluded.description,category=excluded.category,
+      framework_ref=excluded.framework_ref,owner=excluded.owner,frequency=excluded.frequency,risk_level=excluded.risk_level,evidence_required=excluded.evidence_required,updated_at=now()`,
+      [orgId,item.code,item.title,item.description,item.category,item.framework,item.owner,item.frequency,item.risk,item.evidence]);
+  }
+
+  for(const item of integrationCatalog){
+    await pool.query(`INSERT INTO integrations(organization_id,provider_key,name,category,auth_type,capabilities)
+      VALUES($1,$2,$3,$4,$5,$6::jsonb)
+      ON CONFLICT(organization_id,provider_key) DO UPDATE SET name=excluded.name,category=excluded.category,auth_type=excluded.auth_type,capabilities=excluded.capabilities`,
+      [orgId,item.key,item.name,item.category,item.authType,JSON.stringify(item.capabilities)]);
   }
 
   const demoCount=await pool.query("SELECT count(*)::int AS count FROM assessments WHERE organization_id=$1",[orgId]);
   if(Number(demoCount.rows[0].count)===0){
     const controlRows=await pool.query("SELECT id,control_code FROM controls WHERE organization_id=$1",[orgId]);
     const byCode=Object.fromEntries(controlRows.rows.map((r:any)=>[r.control_code,r.id]));
-    const samples=[
-      ["ITGC-001","Q3 2026","Effective",94,"Quarterly access review completed with two dormant privileged accounts removed."],
-      ["ITGC-004","Q3 2026","Effective",91,"Sampled production changes had approval, testing and deployment evidence."],
-      ["ITGC-006","August 2026","Partially Effective",76,"Backup success remained high but two failures were resolved outside target SLA."],
-      ["ITGC-008","August 2026","Ineffective",58,"Critical remediation SLA exceeded for a small number of internet-facing assets."],
-      ["ITGC-010","Q3 2026","Partially Effective",72,"Review completed; legacy rules require documented business-owner confirmation."]
+    const samples:any[]=[
+      ["IAM-003","Q3 2026","Effective",94,"Privileged recertification completed; dormant elevated accounts removed."],
+      ["CHG-001","Q3 2026","Effective",91,"Sampled production changes had approval, testing and implementation evidence."],
+      ["BCK-001","September 2026","Partially Effective",78,"Two failed jobs exceeded escalation SLA before successful recovery."],
+      ["VUL-002","September 2026","Ineffective",57,"Critical vulnerability remediation exceeded policy SLA for internet-facing assets."],
+      ["NET-001","Q3 2026","Partially Effective",74,"Legacy firewall rules require renewed business-owner justification."],
+      ["LOG-001","Q3 2026","Effective",89,"Critical log sources are centrally ingested with required retention."],
+      ["END-001","September 2026","Effective",96,"EDR coverage is above target with small number of stale devices."],
+      ["PAT-001","September 2026","Partially Effective",81,"Server patching meets target; endpoint backlog requires follow-up."],
+      ["DB-001","Q3 2026","Effective",92,"Database privileged roles were reviewed and unnecessary grants revoked."],
+      ["CLD-002","September 2026","Partially Effective",79,"Cloud role review identified excessive permissions awaiting remediation."],
+      ["TPR-002","Q3 2026","Effective",87,"Critical vendor assurance artefacts reviewed and current."],
+      ["BCP-003","2026 Annual","Partially Effective",76,"Recovery exercise completed but one dependency exceeded RTO."]
     ];
     for(const [code,period,result,score,notes] of samples){
       if(byCode[code]) await pool.query("INSERT INTO assessments(organization_id,control_id,period,result,score,notes,review_status,tested_at) VALUES($1,$2,$3,$4,$5,$6,'Reviewed',now()-interval '5 days')",[orgId,byCode[code],period,result,score,notes]);
     }
-    const evidenceSamples=[
-      ["ITGC-001","Q3 privileged user access review","System Report","Entra ID","Q3 2026","Current"],
-      ["ITGC-004","Production change sample and approvals","Approval","ServiceNow / Jira","Q3 2026","Current"],
-      ["ITGC-006","August backup completion report","System Report","Backup Platform","August 2026","Current"],
-      ["ITGC-008","Monthly vulnerability scan report","System Report","Vulnerability Scanner","August 2026","Current"],
-      ["ITGC-010","Firewall rules review workbook","Document","Manual Upload","Q3 2026","Current"]
+
+    const evidenceSamples:any[]=[
+      ["IAM-003","Q3 privileged access recertification","System Report","Microsoft Entra ID","Q3 2026","Current",true],
+      ["CHG-001","Production change approval sample","Approval","ServiceNow","Q3 2026","Current",true],
+      ["BCK-001","Daily backup success dashboard","System Report","Veeam","September 2026","Current",true],
+      ["VUL-002","Critical vulnerability ageing report","System Report","Tenable / Nessus","September 2026","Current",true],
+      ["NET-001","Firewall rule-review workbook","Document","Palo Alto Networks","Q3 2026","Current",false],
+      ["LOG-001","Log source coverage report","System Report","Microsoft Sentinel","Q3 2026","Current",true],
+      ["END-001","EDR sensor health report","System Report","CrowdStrike Falcon","September 2026","Current",true],
+      ["PAT-001","Monthly patch compliance report","System Report","Microsoft Intune","September 2026","Current",true],
+      ["DB-001","Database privileged role export","System Report","PostgreSQL","Q3 2026","Current",true],
+      ["CLD-002","AWS privileged IAM role review","System Report","Amazon Web Services","September 2026","Current",true],
+      ["TPR-002","Critical vendor assurance tracker","Document","Manual Upload","Q3 2026","Current",false],
+      ["BCP-003","DR exercise result and timing log","Document","Manual Upload","2026 Annual","Current",false],
+      ["SDLC-003","Protected branch and PR approval sample","System Report","GitHub","Q3 2026","Current",true],
+      ["EMAIL-002","DMARC aggregate compliance summary","System Report","Microsoft 365","September 2026","Current",true],
+      ["CFG-001","Server baseline compliance report","System Report","Microsoft Defender for Endpoint","September 2026","Current",true]
     ];
-    for(const [code,title,evidenceType,source,period,status] of evidenceSamples){
-      if(byCode[code]) await pool.query("INSERT INTO evidence(organization_id,control_id,title,evidence_type,source,period,status) VALUES($1,$2,$3,$4,$5,$6,$7)",[orgId,byCode[code],title,evidenceType,source,period,status]);
+    for(const [code,title,evidenceType,source,period,status,automated] of evidenceSamples){
+      if(byCode[code]) await pool.query("INSERT INTO evidence(organization_id,control_id,title,evidence_type,source,period,status,automated,collected_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()-interval '2 days',now()+interval '28 days')",[orgId,byCode[code],title,evidenceType,source,period,status,automated]);
     }
-    const findingsSamples=[
-      ["ITGC-008","Critical vulnerability remediation outside SLA","Four critical vulnerabilities exceeded the approved remediation timeline.","High","Open","Security Manager",14],
-      ["ITGC-006","Backup failure escalation evidence incomplete","Two failed jobs were recovered, but escalation evidence was incomplete.","Medium","In Progress","Infrastructure Manager",21],
-      ["ITGC-010","Legacy firewall rules need business revalidation","A subset of legacy rules lacks recent business-owner confirmation.","Medium","Open","Network Manager",30]
+
+    const findingsSamples:any[]=[
+      ["VUL-002","Critical vulnerability remediation outside SLA","Four critical vulnerabilities exceeded approved remediation timelines.","High","Open","Vulnerability Manager",14],
+      ["BCK-001","Backup failure escalation evidence incomplete","Two failed jobs were recovered but escalation evidence was incomplete.","Medium","In Progress","Infrastructure Manager",21],
+      ["NET-001","Legacy firewall rules require business revalidation","A subset of legacy rules lacks recent owner justification.","Medium","Open","Network Manager",30],
+      ["CLD-002","Excessive cloud permissions identified","Two administrative cloud roles exceed current job responsibilities.","High","In Progress","Cloud Security Lead",10],
+      ["PAT-001","Endpoint patch backlog above target","A set of remote endpoints is outside the approved patch threshold.","Medium","Open","Endpoint Manager",20],
+      ["BCP-003","Recovery dependency exceeded RTO","One supporting service caused the exercise to exceed the target RTO.","High","Open","BCM Manager",45],
+      ["TPR-002","Vendor assurance report nearing expiry","A critical SaaS vendor assurance report needs renewal.","Low","Open","Vendor Risk Manager",60],
+      ["SDLC-004","Legacy repository secret requires rotation","A historical credential was detected in repository history and needs rotation.","High","In Progress","DevOps Lead",7]
     ];
     for(const [code,title,description,severity,status,owner,days] of findingsSamples){
       if(byCode[code]) await pool.query("INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date) VALUES($1,$2,$3,$4,$5,$6,$7,current_date + ($8 || ' days')::interval)",[orgId,byCode[code],title,description,severity,status,owner,days]);
     }
+
+    const integrationRows=await pool.query("SELECT id,provider_key FROM integrations WHERE organization_id=$1",[orgId]);
+    const byIntegration=Object.fromEntries(integrationRows.rows.map((r:any)=>[r.provider_key,r.id]));
+    const rules:any[]=[
+      ["IAM-003","microsoft-entra","Collect privileged role assignments","Weekly"],
+      ["IAM-005","microsoft-entra","Collect MFA coverage","Daily"],
+      ["SDLC-003","github","Collect protected branch and PR approval evidence","Daily"],
+      ["CHG-001","servicenow","Collect approved production changes","Daily"],
+      ["VUL-002","tenable","Collect critical vulnerability ageing","Daily"],
+      ["END-001","crowdstrike","Collect endpoint sensor health","Daily"],
+      ["LOG-001","microsoft-sentinel","Collect log-source coverage","Daily"],
+      ["BCK-001","veeam","Collect backup job success/failure","Daily"],
+      ["CLD-002","aws","Collect privileged IAM role inventory","Daily"],
+      ["PAT-001","intune","Collect patch compliance","Weekly"],
+      ["DB-001","postgresql","Collect privileged database roles","Weekly"],
+      ["EMAIL-002","microsoft-365","Collect email-authentication posture","Weekly"]
+    ];
+    for(const [code,key,name,schedule] of rules){
+      if(byCode[code]&&byIntegration[key]) await pool.query("INSERT INTO automation_rules(organization_id,control_id,integration_id,name,schedule,status) VALUES($1,$2,$3,$4,$5,'Ready')",[orgId,byCode[code],byIntegration[key],name,schedule]);
+    }
   }
 }
-
 app.get("/api/health",async(_req,res)=>{
   try{ await pool.query("SELECT 1"); res.json({status:"ok",database:"ready",service:"Revolt-X Enterprise Control Management"}); }
   catch(e){ res.status(503).json({status:"error",database:"unavailable"}); }
@@ -348,6 +419,62 @@ app.put("/api/findings/:id",auth,permit("findings.write"),async(req:AuthedReques
     resolved_at=CASE WHEN $3 IN ('Closed','Resolved') THEN now() ELSE NULL END WHERE id=$1 AND organization_id=$2 RETURNING *`,
     [id,req.user!.orgId,d.status,d.owner??null,d.due_date??null,d.description??null]);
   if(!q.rowCount) return res.status(404).json({error:"Finding not found"}); await audit(req.user!,"UPDATE","finding",id,{status:d.status}); res.json(q.rows[0]);
+});
+
+app.get("/api/integrations",auth,permit("integrations.read"),async(req:AuthedRequest,res)=>{
+  const q=await pool.query(`SELECT i.*,
+    (SELECT count(*)::int FROM automation_rules a WHERE a.integration_id=i.id) automation_count
+    FROM integrations i WHERE i.organization_id=$1 ORDER BY category,name`,[req.user!.orgId]);
+  res.json(q.rows);
+});
+
+app.put("/api/integrations/:id",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id);
+  const s=z.object({status:z.enum(["Available","Configured","Connected","Paused"]),base_url:z.string().optional(),tenant_ref:z.string().optional()});
+  const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid integration settings"});
+  const q=await pool.query(`UPDATE integrations SET status=$3,base_url=COALESCE($4,base_url),tenant_ref=COALESCE($5,tenant_ref),
+    last_sync_at=CASE WHEN $3='Connected' THEN now() ELSE last_sync_at END WHERE id=$1 AND organization_id=$2 RETURNING *`,
+    [id,req.user!.orgId,p.data.status,p.data.base_url??null,p.data.tenant_ref??null]);
+  if(!q.rowCount) return res.status(404).json({error:"Integration not found"});
+  await audit(req.user!,"UPDATE","integration",id,{status:p.data.status});res.json(q.rows[0]);
+});
+
+app.get("/api/automation",auth,permit("automation.read"),async(req:AuthedRequest,res)=>{
+  const q=await pool.query(`SELECT a.*,c.control_code,c.title control_title,i.name integration_name,i.status integration_status
+    FROM automation_rules a JOIN controls c ON c.id=a.control_id JOIN integrations i ON i.id=a.integration_id
+    WHERE a.organization_id=$1 ORDER BY a.status,a.name`,[req.user!.orgId]);
+  res.json(q.rows);
+});
+
+app.post("/api/automation",auth,permit("automation.write"),async(req:AuthedRequest,res)=>{
+  const s=z.object({control_id:z.number().int(),integration_id:z.number().int(),name:z.string().min(3),schedule:z.string().min(2),evidence_type:z.string().default("System Report")});
+  const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid automation rule",details:p.error.flatten()});
+  const d=p.data;
+  const valid=await pool.query(`SELECT 1 FROM controls c JOIN integrations i ON i.organization_id=c.organization_id
+    WHERE c.id=$1 AND i.id=$2 AND c.organization_id=$3`,[d.control_id,d.integration_id,req.user!.orgId]);
+  if(!valid.rowCount) return res.status(400).json({error:"Control or integration is not available to this organisation"});
+  const q=await pool.query("INSERT INTO automation_rules(organization_id,control_id,integration_id,name,schedule,evidence_type,status) VALUES($1,$2,$3,$4,$5,$6,'Ready') RETURNING *",
+    [req.user!.orgId,d.control_id,d.integration_id,d.name,d.schedule,d.evidence_type]);
+  await audit(req.user!,"CREATE","automation_rule",q.rows[0].id,{controlId:d.control_id,integrationId:d.integration_id});res.status(201).json(q.rows[0]);
+});
+
+app.post("/api/automation/:id/run",auth,permit("automation.write"),async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id);
+  const q=await pool.query(`SELECT a.*,i.status integration_status FROM automation_rules a JOIN integrations i ON i.id=a.integration_id
+    WHERE a.id=$1 AND a.organization_id=$2`,[id,req.user!.orgId]);
+  if(!q.rowCount) return res.status(404).json({error:"Automation rule not found"});
+  if(q.rows[0].integration_status!=="Connected") return res.status(409).json({error:"Connect and validate the source integration before running automated evidence collection"});
+  res.status(501).json({error:"Live connector execution requires provider credentials and the provider-specific connector worker. The rule is ready but no credentials are configured."});
+});
+
+app.get("/api/reports/control-health",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+  const q=await pool.query(`SELECT c.control_code,c.title,c.category,c.risk_level,c.owner,c.next_due,
+    COALESCE((SELECT a.score FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1),0) score,
+    COALESCE((SELECT a.result FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1),'Not Tested') latest_result,
+    (SELECT count(*)::int FROM evidence e WHERE e.control_id=c.id AND e.status='Current') current_evidence,
+    (SELECT count(*)::int FROM findings f WHERE f.control_id=c.id AND f.status NOT IN ('Closed','Resolved')) open_findings
+    FROM controls c WHERE c.organization_id=$1 ORDER BY c.category,c.control_code`,[req.user!.orgId]);
+  res.json(q.rows);
 });
 
 app.get("/api/audit",auth,permit("audit.read"),async(req:AuthedRequest,res)=>{
