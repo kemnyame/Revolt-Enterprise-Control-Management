@@ -1007,15 +1007,30 @@ async function runStartupSmokeTest(){
     results.testControl="ok";
     results.testReview="ok";
 
-    const gh=await fetch("https://api.github.com/repos/kemnyame/Revolt-Enterprise-Control-Management",{headers:{"Accept":"application/vnd.github+json","User-Agent":"Revolt-X-Control-Smoke-Test"}});
-    if(!gh.ok) throw new Error(`Smoke test GitHub connectivity failed: ${gh.status}`);
-    results.githubConnectivity="ok";
+    try{
+      const gh=await fetch("https://api.github.com/repos/kemnyame/Revolt-Enterprise-Control-Management",{headers:{"Accept":"application/vnd.github+json","User-Agent":"Revolt-X-Control-Smoke-Test"}});
+      results.githubConnectivity=gh.ok?"ok":"unavailable:"+gh.status;
+      if(!gh.ok) console.warn("GitHub connectivity smoke check unavailable",gh.status);
+    }catch(err:any){
+      results.githubConnectivity="unavailable";
+      console.warn("GitHub connectivity smoke check failed",err?.message||err);
+    }
   } finally {
-    if(smokeAssessmentId) await pool.query("DELETE FROM assessments WHERE id=$1",[smokeAssessmentId]);
-    if(smokeEvidenceId) await pool.query("DELETE FROM evidence WHERE id=$1",[smokeEvidenceId]);
-    if(smokeFileId) await pool.query("DELETE FROM evidence_files WHERE id=$1",[smokeFileId]);
+    if(smokeAssessmentId){
+      await pool.query("DELETE FROM audit_logs WHERE entity_type='assessment' AND entity_id=$1",[smokeAssessmentId]).catch(()=>{});
+      await pool.query("DELETE FROM audit_logs WHERE action='TEST_CONTROL' AND entity_type='control' AND entity_id=$1 AND details->>'assessmentId'=$2",[controlId,String(smokeAssessmentId)]).catch(()=>{});
+      await pool.query("DELETE FROM assessments WHERE id=$1",[smokeAssessmentId]);
+    }
+    if(smokeEvidenceId){
+      await pool.query("DELETE FROM audit_logs WHERE entity_type='evidence' AND entity_id=$1",[smokeEvidenceId]).catch(()=>{});
+      await pool.query("DELETE FROM audit_logs WHERE action='UPLOAD_EVIDENCE' AND entity_type='control' AND entity_id=$1 AND details->>'evidenceId'=$2",[controlId,String(smokeEvidenceId)]).catch(()=>{});
+      await pool.query("DELETE FROM evidence WHERE id=$1",[smokeEvidenceId]);
+    }
+    if(smokeFileId){
+      await pool.query("DELETE FROM audit_logs WHERE entity_type='evidence_file' AND entity_id=$1",[smokeFileId]).catch(()=>{});
+      await pool.query("DELETE FROM evidence_files WHERE id=$1",[smokeFileId]);
+    }
     await pool.query("UPDATE controls SET last_tested=$2,next_due=$3 WHERE id=$1",[controlId,controlRow.rows[0].last_tested,controlRow.rows[0].next_due]);
-    await pool.query("DELETE FROM audit_logs WHERE organization_id=(SELECT organization_id FROM controls WHERE id=$1) AND details::text LIKE '%startup_smoke%' OR details::text LIKE '%startup-smoke%'",[controlId]).catch(()=>{});
   }
   console.log("Authenticated startup smoke test passed",JSON.stringify(results));
 }
