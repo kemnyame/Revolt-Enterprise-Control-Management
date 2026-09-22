@@ -1,6 +1,6 @@
 const state={
   token:localStorage.getItem("revolt_token")||"",user:null,permissions:[],
-  dashboard:null,controls:[],evidence:[],assessments:[],findings:[],integrations:[],audit:[],users:[],
+  dashboard:null,controls:[],evidence:[],assessments:[],findings:[],integrations:[],automation:[],library:[],report:[],frameworkCoverage:[],evidenceFreshness:null,assuranceSummary:null,audit:[],users:[],
   page:"overview",currentControl:null
 };
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
@@ -44,24 +44,25 @@ async function loadAll(){
   try{
     const jobs=[
       api("/api/dashboard"),api("/api/controls"),api("/api/evidence"),api("/api/assessments"),api("/api/findings"),api("/api/integrations"),
+      api("/api/automation"),api("/api/control-library"),api("/api/reports/control-health"),api("/api/reports/framework-coverage"),api("/api/reports/evidence-freshness"),api("/api/reports/assurance-summary"),
       has("audit.read")?api("/api/audit"):Promise.resolve([]),has("users.read")?api("/api/users"):Promise.resolve([])
     ];
-    const [dashboard,controls,evidence,assessments,findings,integrations,audit,users]=await Promise.all(jobs);
-    Object.assign(state,{dashboard,controls,evidence,assessments,findings,integrations,audit,users});renderAll();
+    const [dashboard,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users]=await Promise.all(jobs);
+    Object.assign(state,{dashboard,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users});renderAll();
   }catch(e){toast(e.message)}finally{document.body.classList.remove("loading")}
 }
-async function refresh(parts=["dashboard","controls","evidence","assessments","findings","integrations","audit","users"]){
-  const routes={dashboard:"/api/dashboard",controls:"/api/controls",evidence:"/api/evidence",assessments:"/api/assessments",findings:"/api/findings",integrations:"/api/integrations",audit:"/api/audit",users:"/api/users"};
+async function refresh(parts=["dashboard","controls","evidence","assessments","findings","integrations","automation","library","audit","users"]){
+  const routes={dashboard:"/api/dashboard",controls:"/api/controls",evidence:"/api/evidence",assessments:"/api/assessments",findings:"/api/findings",integrations:"/api/integrations",automation:"/api/automation",library:"/api/control-library",report:"/api/reports/control-health",frameworkCoverage:"/api/reports/framework-coverage",evidenceFreshness:"/api/reports/evidence-freshness",assuranceSummary:"/api/reports/assurance-summary",audit:"/api/audit",users:"/api/users"};
   for(const p of parts){if((p==="audit"&&!has("audit.read"))||(p==="users"&&!has("users.read")))continue;state[p]=await api(routes[p])}
   renderAll();
 }
 function go(page){
   state.page=page;$$(".page").forEach(x=>x.classList.add("hidden"));$("#"+page+"Page")?.classList.remove("hidden");
   $$("[data-page]").forEach(b=>b.classList.toggle("active",b.dataset.page===page));
-  const titles={overview:"IT controls overview",controls:"Control register",evidence:"Evidence vault",assessments:"Testing & assurance",findings:"Issues & remediation",integrations:"Integrations",library:"Control library",audit:"Audit trail",settings:"Settings & team",manual:"User manual",controlDetail:"Control record"};
+  const titles={overview:"IT controls overview",controls:"Control register",evidence:"Evidence vault",assessments:"Testing & assurance",findings:"Issues & remediation",integrations:"Integrations",library:"Control library",audit:"Audit trail",users:"Settings & team",manual:"User manual",reports:"Control health",controlDetail:"Control record"};
   $("#pageTitle").textContent=titles[page]||"IT Controls";$(".sidebar").classList.remove("open");window.scrollTo(0,0);
 }
-function renderAll(){renderDashboard();renderControls();renderEvidence();renderAssessments();renderFindings();renderIntegrations();renderLibrary();renderAudit();renderUsers();populateFilters();renderManual("start")}
+function renderAll(){renderDashboard();renderControls();renderEvidence();renderAssessments();renderFindings();renderIntegrations();renderAutomation();renderLibrary();renderReports();renderAudit();renderUsers();populateFilters();renderManual("start")}
 function renderDashboard(){
   const d=state.dashboard||{},c=d.controls||{},a=d.assessments||{},e=d.evidence||{},f=d.findings||{};
   const metrics=[
@@ -126,16 +127,30 @@ function renderIntegrations(){
     ["Evidence automation",state.integrations.filter(i=>Number(i.automation_count)>0).length,"providers mapped to rules"]
   ].map(x=>'<div class="metric"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
   const q=$("#integrationSearch")?.value?.toLowerCase()||"",cat=$("#integrationCategory")?.value||"",status=$("#integrationStatus")?.value||"";
-  const rows=state.integrations.filter(i=>(!q||(i.name+" "+i.category+" "+(i.capabilities||[]).join(" ")).toLowerCase().includes(q))&&(!cat||i.category===cat)&&(!status||i.status===status));
+  const rows=state.integrations.filter(i=>i.provider_key!=="github"&&(!q||(i.name+" "+i.category+" "+(i.capabilities||[]).join(" ")).toLowerCase().includes(q))&&(!cat||i.category===cat)&&(!status||i.status===status));
   $("#integrationGrid").innerHTML=rows.map(i=>'<article class="integration-card"><div class="integration-card-head"><span class="integration-logo">'+initials(i.name)+'</span>'+tag(i.status)+'</div><h3>'+esc(i.name)+'</h3><p>'+esc(i.category)+' · '+esc(i.auth_type)+'</p><div class="capabilities">'+(Array.isArray(i.capabilities)?i.capabilities:[]).slice(0,6).map(x=>'<span>'+esc(x)+'</span>').join("")+'</div><div class="integration-foot"><span>'+esc(i.automation_count||0)+' mapped rule(s)</span><button '+(i.provider_key==="github"?'data-github-shortcut':'data-provider-info="'+esc(i.name)+'"')+'>'+(i.provider_key==="github"?(i.status==="Connected"?"Manage":"Connect"):"Connector details")+'</button></div></article>').join("");
   $$("[data-github-shortcut]").forEach(b=>b.onclick=()=>gh?.status==="Connected"?manageGithubRepos():connectGithub());
   $$("[data-provider-info]").forEach(b=>b.onclick=()=>modal('<span class="caps">CONNECTOR ROADMAP</span><h2>'+esc(b.dataset.providerInfo)+'</h2><p>This provider is in the integration catalogue, but only connectors that complete credential validation and live evidence collection are marked Connected. GitHub is the first live commercial connector in this rollout.</p><div class="manual-tip">The platform will not fake connection status or automated evidence for a provider that has not passed a live connector validation.</div><div class="form-actions"><button class="btn dark" data-close-modal>Close</button></div>'));
 }
+function renderAutomation(){
+  if(!$("#automationBody"))return;
+  $("#automationBody").innerHTML=state.automation.length?state.automation.map(a=>'<tr><td class="control-name"><b>'+esc(a.name)+'</b><span>'+esc(a.evidence_type)+'</span></td><td>'+esc(a.control_code)+' · '+esc(a.control_title)+'</td><td>'+esc(a.integration_name)+'</td><td>'+esc(a.schedule)+'</td><td>'+tag(a.integration_status)+'</td><td>'+fmtTime(a.last_run_at)+'</td><td><button class="action-btn" data-run-rule="'+a.id+'" '+(a.integration_status==="Connected"?"":"disabled")+'>Run now</button></td></tr>').join(""):'<tr><td colspan="7" class="empty-state">No evidence automation rules configured.</td></tr>';
+  $$("[data-run-rule]").forEach(b=>b.onclick=async()=>{const a=state.automation.find(x=>x.id===Number(b.dataset.runRule));if(a?.integration_name==="GitHub")return syncGithub();try{const r=await api("/api/automation/"+b.dataset.runRule+"/run",{method:"POST",body:"{}"});toast(r.message||"Automation completed")}catch(e){toast(e.message)}});
+}
+function renderReports(){
+  if(!$("#reportSummary"))return;
+  const rows=state.report||[],tested=rows.filter(r=>r.latest_result!=="Not Tested"),avg=tested.length?Math.round(tested.reduce((s,r)=>s+Number(r.score||0),0)/tested.length):0,summary=state.assuranceSummary||{},fresh=state.evidenceFreshness||{};
+  $("#reportSummary").innerHTML=[["Average tested score",avg+"%","Across tested controls"],["Testing coverage",(summary.testing_coverage||0)+"%",(summary.tested_controls||0)+" controls tested"],["Automation coverage",(summary.automation_coverage||0)+"%",(summary.automated_controls||0)+" controls mapped"],["High issues",summary.high_findings||0,"High-severity open issues"]].map(x=>'<div class="metric"><small>'+esc(x[0])+'</small><strong>'+esc(x[1])+'</strong><p>'+esc(x[2])+'</p></div>').join("");
+  if($("#frameworkCoverage")){const fw=state.frameworkCoverage||[],max=Math.max(1,...fw.map(x=>Number(x.controls||0)));$("#frameworkCoverage").innerHTML=fw.map(x=>'<div class="bar-row"><span>'+esc(x.framework)+'</span><div class="bar-track"><i style="width:'+(Number(x.controls)/max*100)+'%"></i></div><b>'+esc(x.controls)+'</b></div>').join("")}
+  if($("#evidenceFreshness"))$("#evidenceFreshness").innerHTML='<div class="mini-stats"><div><small>Fresh</small><strong>'+esc(fresh.fresh||0)+'</strong></div><div><small>Expiring soon</small><strong>'+esc(fresh.expiring_soon||0)+'</strong></div><div><small>Expired</small><strong>'+esc(fresh.expired||0)+'</strong></div></div>';
+  if($("#reportBody"))$("#reportBody").innerHTML=rows.map(r=>'<tr><td class="control-name"><b>'+esc(r.control_code)+' · '+esc(r.title)+'</b><span>'+esc(r.owner||"Unassigned")+'</span></td><td>'+esc(r.category)+'</td><td>'+tag(r.risk_level)+'</td><td>'+esc(r.score||"—")+'</td><td>'+tag(r.latest_result)+'</td><td>'+esc(r.current_evidence)+'</td><td>'+esc(r.open_findings)+'</td><td>'+fmtDate(r.next_due)+'</td></tr>').join("");
+}
 function renderLibrary(){
-  const groups={};state.controls.forEach(c=>(groups[c.category]??=[]).push(c));
-  $("#libraryGrid").innerHTML=Object.entries(groups).sort((a,b)=>a[0].localeCompare(b[0])).map(([cat,items])=>'<article class="library-card"><span class="caps">CONTROL AREA</span><h3>'+esc(cat)+'</h3><strong>'+items.length+'</strong><p>active controls</p><div class="library-list">'+items.slice(0,5).map(c=>'<button data-lib-control="'+c.id+'">'+esc(c.control_code)+' · '+esc(c.title)+'</button>').join("")+(items.length>5?'<button data-page-link="controls">+'+(items.length-5)+' more controls</button>':'')+'</div></article>').join("");
-  $$("[data-lib-control]").forEach(b=>b.onclick=()=>openControl(Number(b.dataset.libControl)));
-  bindPageLinks();
+  if(!$("#libraryGrid"))return;
+  const q=$("#librarySearch")?.value?.toLowerCase()||"",cat=$("#libraryCategory")?.value||"",risk=$("#libraryRisk")?.value||"";
+  const rows=(state.library||[]).filter(x=>(!q||(x.code+" "+x.title+" "+x.description+" "+x.framework).toLowerCase().includes(q))&&(!cat||x.category===cat)&&(!risk||x.risk===risk));
+  $("#libraryGrid").innerHTML=rows.length?rows.map(x=>'<article class="library-card"><div class="integration-card-head"><span class="control-code">'+esc(x.code)+'</span>'+tag(x.risk)+'</div><h3>'+esc(x.title)+'</h3><p>'+esc(x.description)+'</p><div class="library-meta"><span>'+esc(x.category)+'</span><span>'+esc(x.framework)+'</span></div><div class="library-foot"><span>'+esc(x.frequency)+'</span>'+(x.active?'<span class="active-in-register">✓ In register</span>':'<button class="action-btn" data-add-library="'+esc(x.code)+'">Add to register</button>')+'</div></article>').join(""):'<div class="empty-state">No library controls match the current filters.</div>';
+  $$("[data-add-library]").forEach(b=>b.onclick=async()=>{try{await api("/api/control-library/"+encodeURIComponent(b.dataset.addLibrary)+"/add",{method:"POST",body:"{}"});toast("Control added to register");await refresh(["controls","library","dashboard","audit"])}catch(e){toast(e.message)}});
 }
 function renderAudit(){
   $("#auditBody").innerHTML=state.audit.length?state.audit.map(a=>'<tr><td>'+fmtTime(a.created_at)+'</td><td class="control-name"><b>'+esc(a.user_name||"System")+'</b><span>'+esc(a.email||"")+'</span></td><td><b>'+esc(a.action)+'</b></td><td>'+esc(a.entity_type)+'</td><td>'+esc(a.entity_id??"—")+'</td><td>'+esc(JSON.stringify(a.details||{}).slice(0,120))+'</td></tr>').join(""):'<tr><td colspan="6" class="empty-state">No audit activity available.</td></tr>';
@@ -147,6 +162,7 @@ function populateFilters(){
   const cats=[...new Set(state.controls.map(c=>c.category))].sort();
   if($("#categoryFilter")){const old=$("#categoryFilter").value;$("#categoryFilter").innerHTML='<option value="">All control areas</option>'+cats.map(c=>'<option>'+esc(c)+'</option>').join("");$("#categoryFilter").value=old}
   if($("#integrationCategory")){const cats2=[...new Set(state.integrations.map(i=>i.category))].sort(),old=$("#integrationCategory").value;$("#integrationCategory").innerHTML='<option value="">All categories</option>'+cats2.map(c=>'<option>'+esc(c)+'</option>').join("");$("#integrationCategory").value=old}
+  if($("#libraryCategory")){const lc=[...new Set((state.library||[]).map(i=>i.category))].sort(),old=$("#libraryCategory").value;$("#libraryCategory").innerHTML='<option value="">All control areas</option>'+lc.map(x=>'<option>'+esc(x)+'</option>').join("");$("#libraryCategory").value=old}
 }
 async function openControl(id){
   try{
@@ -250,8 +266,9 @@ $("#loginForm").addEventListener("submit",login);$("#logoutBtn").onclick=logout;
 $$("[data-page]").forEach(b=>b.onclick=()=>go(b.dataset.page));
 bindPageLinks();bindOpenForms();bindModalClose();
 $("#modal").addEventListener("click",e=>{if(e.target.matches("[data-close-modal]"))closeModal()});
-$("#uploadEvidenceBtn").onclick=openUploadEvidence;$("#startTestBtn").onclick=startGenericTest;$("#startTestBtn2").onclick=startGenericTest;$("#auditPackBtn").onclick=downloadAuditPack;
+$("#uploadEvidenceBtn").onclick=openUploadEvidence;$("#startTestBtn").onclick=startGenericTest;$("#startTestBtn2").onclick=startGenericTest;$("#testControlTopBtn")?.addEventListener("click",startGenericTest);$("#manualBtn")?.addEventListener("click",()=>go("manual"));$("#auditPackBtn").onclick=downloadAuditPack;$("#healthAuditPackBtn")?.addEventListener("click",downloadAuditPack);
 $$("[data-manual]").forEach(b=>b.onclick=()=>renderManual(b.dataset.manual));
 ["controlSearch","categoryFilter","riskFilter"].forEach(id=>$("#"+id)?.addEventListener(id==="controlSearch"?"input":"change",renderControls));
 ["integrationSearch","integrationCategory","integrationStatus"].forEach(id=>$("#"+id)?.addEventListener(id==="integrationSearch"?"input":"change",renderIntegrations));
+["librarySearch","libraryCategory","libraryRisk"].forEach(id=>$("#"+id)?.addEventListener(id==="librarySearch"?"input":"change",renderLibrary));
 restore();
