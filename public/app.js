@@ -175,12 +175,12 @@ async function openControl(id){
   try{
     const d=await api("/api/controls/"+id);state.currentControl=d;
     const c=d.control;
-    $("#controlDetail").innerHTML='<div class="control-detail-head"><div><span class="caps">CONTROL RECORD</span><h1>'+esc(c.control_code)+' · '+esc(c.title)+'</h1><p>'+esc(c.description)+'</p></div><div class="toolbar-actions"><button class="btn outline" data-back-register>Back</button><button class="btn dark" data-detail-test="'+c.id+'">Test control</button></div></div>'+
+    $("#controlDetail").innerHTML='<div class="control-detail-head"><div><span class="caps">CONTROL RECORD</span><h1>'+esc(c.control_code)+' · '+esc(c.title)+'</h1><p>'+esc(c.description)+'</p></div><div class="toolbar-actions"><button class="btn outline" data-back-register>Back</button>'+(has("controls.write")?'<button class="btn outline" data-edit-control="'+c.id+'">Edit</button>':'')+'<button class="btn dark" data-detail-test="'+c.id+'">Test control</button></div></div>'+
     '<div class="detail-grid"><div class="detail-card"><small>CONTROL AREA</small><b>'+esc(c.category)+'</b></div><div class="detail-card"><small>OWNER</small><b>'+esc(c.owner||"Unassigned")+'</b></div><div class="detail-card"><small>FREQUENCY</small><b>'+esc(c.frequency)+'</b></div><div class="detail-card"><small>RISK</small><b>'+tag(c.risk_level)+'</b></div><div class="detail-card"><small>FRAMEWORK</small><b>'+esc(c.framework_ref||"—")+'</b></div><div class="detail-card"><small>EVIDENCE EXPECTATION</small><b>'+esc(c.evidence_required||"—")+'</b></div></div>'+
     '<section class="detail-section panel"><div class="panel-head"><div><span class="caps">EVIDENCE</span><h3>Evidence attached to this control</h3></div></div>'+(d.evidence.length?d.evidence.map(e=>'<div class="activity-item"><span>▣</span><div><b>'+esc(e.title)+'</b><small>'+esc(e.source)+' · '+tag(e.review_status)+'</small></div><time>'+fmtDate(e.created_at)+'</time></div>').join(""):'<div class="empty-state">No evidence yet.</div>')+'</section>'+
     '<section class="detail-section panel"><div class="panel-head"><div><span class="caps">TEST HISTORY</span><h3>Recorded control tests</h3></div></div>'+(d.tests.length?d.tests.map(t=>'<div class="activity-item"><span>✓</span><div><b>'+esc(t.period)+' · '+esc(t.result)+'</b><small>'+esc(t.tester_name||"—")+' · Score '+esc(t.score??"—")+'%</small></div><time>'+fmtDate(t.tested_at)+'</time></div>').join(""):'<div class="empty-state">This control has not been tested.</div>')+'</section>'+
     '<section class="detail-section panel"><div class="panel-head"><div><span class="caps">ISSUES</span><h3>Findings and remediation</h3></div></div>'+(d.findings.length?d.findings.map(x=>'<div class="activity-item"><span>!</span><div><b>'+esc(x.title)+'</b><small>'+esc(x.owner||"Unassigned")+' · '+esc(x.status)+'</small></div><time>'+fmtDate(x.due_date)+'</time></div>').join(""):'<div class="empty-state">No findings linked to this control.</div>')+'</section>';
-    go("controlDetail");$("[data-back-register]").onclick=()=>go("controls");$("[data-detail-test]").onclick=()=>openTestControl(id);
+    go("controlDetail");$("[data-back-register]").onclick=()=>go("controls");$("[data-detail-test]").onclick=()=>openTestControl(id);if($("[data-edit-control]"))$("[data-edit-control]").onclick=()=>editControl(c);
   }catch(e){toast(e.message)}
 }
 async function openTestControl(id){
@@ -215,6 +215,38 @@ async function downloadEvidence(id){
 function reviewEvidence(id){
   const e=state.evidence.find(x=>x.id===id);modal('<span class="caps">EVIDENCE REVIEW</span><h2>'+esc(e?.title||"Review evidence")+'</h2><form class="form" id="reviewEvidenceForm"><label>Decision<select name="review_status"><option>Approved</option><option>Needs Update</option><option>Rejected</option></select></label><label>Review notes<textarea name="review_notes" placeholder="Explain the review conclusion."></textarea></label><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Record review</button></div></form>');
   $("#reviewEvidenceForm").onsubmit=async ev=>{ev.preventDefault();const d=Object.fromEntries(new FormData(ev.target).entries());try{await api("/api/evidence/"+id+"/review",{method:"POST",body:JSON.stringify(d)});closeModal();toast("Evidence review recorded");await refresh(["evidence","audit"])}catch(err){toast(err.message)}};
+}
+async function verifyEvidence(id){
+  try{
+    const d=await api("/api/evidence/"+id+"/verify",{method:"POST",body:"{}"});
+    toast(d.valid?"Integrity verified: SHA-256 matches":"Integrity verification failed");
+    await refresh(["audit"]);
+  }catch(e){toast(e.message)}
+}
+function reviewAssessment(id){
+  const a=state.assessments.find(x=>x.id===id);
+  modal('<span class="caps">TEST REVIEW</span><h2>Review control test</h2><p>'+esc(a?.control_code||"")+' · '+esc(a?.control_title||"")+' · '+esc(a?.period||"")+'</p><form class="form" id="reviewTestForm"><label>Review decision<select name="review_status"><option>Reviewed</option><option>Needs Rework</option><option>Rejected</option></select></label><label>Review notes<textarea name="review_notes" required placeholder="Document the reviewer conclusion."></textarea></label><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Record review</button></div></form>');
+  $("#reviewTestForm").onsubmit=async e=>{
+    e.preventDefault();
+    const d=Object.fromEntries(new FormData(e.target).entries());
+    try{await api("/api/assessments/"+id+"/review",{method:"POST",body:JSON.stringify(d)});closeModal();toast("Test review recorded");await refresh(["assessments","audit"])}
+    catch(err){toast(err.message)}
+  };
+}
+function editControl(control){
+  const options=(values,current)=>values.map(x=>'<option '+(x===current?"selected":"")+'>'+x+'</option>').join("");
+  modal('<span class="caps">CONTROL REGISTER</span><h2>Edit '+esc(control.control_code)+'</h2><form class="form" id="editControlForm"><label>Title<input name="title" required value="'+esc(control.title)+'"></label><label>Description<textarea name="description">'+esc(control.description||"")+'</textarea></label><div class="form-grid"><label>Control area<input name="category" value="'+esc(control.category)+'"></label><label>Framework mapping<input name="framework_ref" value="'+esc(control.framework_ref||"")+'"></label><label>Owner<input name="owner" value="'+esc(control.owner||"")+'"></label><label>Frequency<select name="frequency">'+options(["Continuous","Daily","Weekly","Monthly","Quarterly","Semi-Annual","Annual"],control.frequency)+'</select></label><label>Risk<select name="risk_level">'+options(["High","Medium","Low"],control.risk_level)+'</select></label><label>Status<select name="status">'+options(["Active","Inactive"],control.status)+'</select></label></div><label>Required evidence<textarea name="evidence_required">'+esc(control.evidence_required||"")+'</textarea></label><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Save changes</button></div></form>');
+  $("#editControlForm").onsubmit=async e=>{
+    e.preventDefault();
+    const d=Object.fromEntries(new FormData(e.target).entries());
+    try{await api("/api/controls/"+control.id,{method:"PUT",body:JSON.stringify(d)});closeModal();toast("Control updated");await refresh(["controls","dashboard","audit"]);await openControl(control.id)}
+    catch(err){toast(err.message)}
+  };
+}
+async function setUserStatus(id,status){
+  if(!confirm((status==="disabled"?"Disable":"Enable")+" this user account?"))return;
+  try{await api("/api/users/"+id+"/status",{method:"PUT",body:JSON.stringify({status})});toast("User status updated");await refresh(["users","audit"])}
+  catch(e){toast(e.message)}
 }
 async function connectGithub(){
   modal('<span class="caps">GITHUB · LIVE CONNECTOR</span><h2>Connect GitHub</h2><p>Use a GitHub fine-grained personal access token or classic token with read access to the repositories you want to assess. The token is encrypted before it is stored.</p><form class="form" id="githubConnectForm"><label>GitHub token<input name="token" type="password" required autocomplete="off" placeholder="github_pat_..."></label><div class="manual-tip"><b>Recommended permissions:</b> repository metadata/read, contents/read, pull requests/read, actions/read, and security-event read permissions where your plan and repository permit them.</div><div class="form-actions"><button type="button" class="btn outline" data-close-modal>Cancel</button><button class="btn dark">Validate & connect</button></div></form>');
@@ -274,7 +306,19 @@ $$("[data-page]").forEach(b=>b.onclick=()=>go(b.dataset.page));
 bindPageLinks();bindOpenForms();bindModalClose();
 $("#modal").addEventListener("click",e=>{if(e.target.matches("[data-close-modal]"))closeModal()});
 $("#uploadEvidenceBtn").onclick=openUploadEvidence;$("#startTestBtn").onclick=startGenericTest;$("#startTestBtn2").onclick=startGenericTest;$("#testControlTopBtn")?.addEventListener("click",startGenericTest);$("#manualBtn")?.addEventListener("click",()=>go("manual"));$("#auditPackBtn").onclick=downloadAuditPack;$("#healthAuditPackBtn")?.addEventListener("click",downloadAuditPack);
-$$("[data-manual]").forEach(b=>b.onclick=()=>renderManual(b.dataset.manual));
+$("#orgSettingsForm")?.addEventListener("submit",async e=>{
+  e.preventDefault();
+  const d=Object.fromEntries(new FormData(e.target).entries());
+  try{state.organization=await api("/api/settings/organization",{method:"PUT",body:JSON.stringify(d)});toast("Organisation settings saved")}
+  catch(err){toast(err.message)}
+});
+$("#changePasswordForm")?.addEventListener("submit",async e=>{
+  e.preventDefault();
+  const d=Object.fromEntries(new FormData(e.target).entries());
+  try{await api("/api/auth/change-password",{method:"POST",body:JSON.stringify(d)});e.target.reset();toast("Password changed")}
+  catch(err){toast(err.message)}
+});
+$("[data-manual]").forEach(b=>b.onclick=()=>renderManual(b.dataset.manual));
 ["controlSearch","categoryFilter","riskFilter"].forEach(id=>$("#"+id)?.addEventListener(id==="controlSearch"?"input":"change",renderControls));
 ["integrationSearch","integrationCategory","integrationStatus"].forEach(id=>$("#"+id)?.addEventListener(id==="integrationSearch"?"input":"change",renderIntegrations));
 ["librarySearch","libraryCategory","libraryRisk"].forEach(id=>$("#"+id)?.addEventListener(id==="librarySearch"?"input":"change",renderLibrary));
