@@ -1,6 +1,6 @@
 const state={
   token:localStorage.getItem("revolt_token")||"",user:null,permissions:[],
-  dashboard:null,controls:[],evidence:[],assessments:[],findings:[],integrations:[],automation:[],library:[],report:[],frameworkCoverage:[],evidenceFreshness:null,assuranceSummary:null,audit:[],users:[],
+  dashboard:null,controls:[],evidence:[],assessments:[],findings:[],integrations:[],automation:[],library:[],report:[],frameworkCoverage:[],evidenceFreshness:null,assuranceSummary:null,audit:[],users:[],organization:null,
   page:"overview",currentControl:null
 };
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
@@ -45,10 +45,10 @@ async function loadAll(){
     const jobs=[
       api("/api/dashboard"),api("/api/controls"),api("/api/evidence"),api("/api/assessments"),api("/api/findings"),api("/api/integrations"),
       api("/api/automation"),api("/api/control-library"),api("/api/reports/control-health"),api("/api/reports/framework-coverage"),api("/api/reports/evidence-freshness"),api("/api/reports/assurance-summary"),
-      has("audit.read")?api("/api/audit"):Promise.resolve([]),has("users.read")?api("/api/users"):Promise.resolve([])
+      has("audit.read")?api("/api/audit"):Promise.resolve([]),has("users.read")?api("/api/users"):Promise.resolve([]),has("settings.read")?api("/api/settings/organization"):Promise.resolve(null)
     ];
-    const [dashboard,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users]=await Promise.all(jobs);
-    Object.assign(state,{dashboard,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users});renderAll();
+    const [dashboard,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users,organization]=await Promise.all(jobs);
+    Object.assign(state,{dashboard,controls,evidence,assessments,findings,integrations,automation,library,report,frameworkCoverage,evidenceFreshness,assuranceSummary,audit,users,organization});renderAll();
   }catch(e){toast(e.message)}finally{document.body.classList.remove("loading")}
 }
 async function refresh(parts=["dashboard","controls","evidence","assessments","findings","integrations","automation","library","audit","users"]){
@@ -62,7 +62,7 @@ function go(page){
   const titles={overview:"IT controls overview",controls:"Control register",evidence:"Evidence vault",assessments:"Testing & assurance",findings:"Issues & remediation",integrations:"Integrations",library:"Control library",audit:"Audit trail",users:"Settings & team",manual:"User manual",reports:"Control health",controlDetail:"Control record"};
   $("#pageTitle").textContent=titles[page]||"IT Controls";$(".sidebar").classList.remove("open");window.scrollTo(0,0);
 }
-function renderAll(){renderDashboard();renderControls();renderEvidence();renderAssessments();renderFindings();renderIntegrations();renderAutomation();renderLibrary();renderReports();renderAudit();renderUsers();populateFilters();renderManual("start")}
+function renderAll(){renderDashboard();renderControls();renderEvidence();renderAssessments();renderFindings();renderIntegrations();renderAutomation();renderLibrary();renderReports();renderAudit();renderUsers();renderSettings();populateFilters();renderManual("start")}
 function renderDashboard(){
   const d=state.dashboard||{},c=d.controls||{},a=d.assessments||{},e=d.evidence||{},f=d.findings||{};
   const metrics=[
