@@ -197,13 +197,22 @@ async function initDb(){
     orgId=created.rows[0].id;
   } else orgId=org.rows[0].id;
 
+  const hash=await bcrypt.hash(adminPassword,12);
   const existing=await pool.query("SELECT id FROM users WHERE lower(email)=lower($1)",[adminEmail]);
   if(!existing.rowCount){
-    const hash=await bcrypt.hash(adminPassword,12);
-    await pool.query("INSERT INTO users(organization_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,'admin')",[
+    await pool.query("INSERT INTO users(organization_id,name,email,password_hash,role,status) VALUES($1,$2,$3,$4,'admin','active')",[
       orgId, process.env.ADMIN_NAME || "Platform Administrator", adminEmail, hash
     ]);
+  } else {
+    await pool.query("UPDATE users SET organization_id=$1,name=$2,password_hash=$3,role='admin',status='active' WHERE lower(email)=lower($4)",[
+      orgId, process.env.ADMIN_NAME || "Platform Administrator", hash, adminEmail
+    ]);
   }
+  const adminCheck=await pool.query("SELECT password_hash FROM users WHERE lower(email)=lower($1)",[adminEmail]);
+  if(!adminCheck.rowCount || !(await bcrypt.compare(adminPassword,adminCheck.rows[0].password_hash))) {
+    throw new Error("Admin credential self-check failed");
+  }
+  console.log("Admin credential self-check passed");
 
   for(const item of controlCatalog){
     await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,frequency,risk_level,evidence_required,next_due)
