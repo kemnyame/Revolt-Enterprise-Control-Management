@@ -477,6 +477,75 @@ app.get("/api/reports/control-health",auth,permit("reports.read"),async(req:Auth
   res.json(q.rows);
 });
 
+
+app.get("/api/reports/framework-coverage",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+  const o=req.user!.orgId;
+  const frameworks=[
+    ["ISO 27001","ISO 27001"],["NIST","NIST"],["CIS","CIS"],["COBIT","COBIT"],
+    ["SOC 2","SOC 2"],["PCI DSS","PCI DSS"],["OWASP","OWASP"],["ISO 22301","ISO 22301"],
+    ["NIST AI RMF","NIST AI RMF"],["ISO 42001","ISO 42001"]
+  ];
+  const rows=[];
+  for(const [name,needle] of frameworks){
+    const q=await pool.query("SELECT count(*)::int total FROM controls WHERE organization_id=$1 AND framework_ref ILIKE '%'||$2||'%'",[o,needle]);
+    rows.push({framework:name,controls:Number(q.rows[0].total)});
+  }
+  res.json(rows.filter(x=>x.controls>0));
+});
+
+app.get("/api/reports/evidence-freshness",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+  const o=req.user!.orgId;
+  const q=await pool.query(`SELECT
+    count(*)::int total,
+    count(*) FILTER (WHERE status='Current' AND (expires_at IS NULL OR expires_at > now()+interval '7 days'))::int fresh,
+    count(*) FILTER (WHERE status='Current' AND expires_at IS NOT NULL AND expires_at <= now()+interval '7 days' AND expires_at > now())::int expiring_soon,
+    count(*) FILTER (WHERE status='Expired' OR (expires_at IS NOT NULL AND expires_at <= now()))::int expired,
+    count(*) FILTER (WHERE automated=true)::int automated
+    FROM evidence WHERE organization_id=$1`,[o]);
+  const due=await pool.query(`SELECT e.id,e.title,e.source,e.expires_at,c.control_code,c.title control_title
+    FROM evidence e JOIN controls c ON c.id=e.control_id
+    WHERE e.organization_id=$1 AND e.expires_at IS NOT NULL AND e.expires_at <= now()+interval '14 days'
+    ORDER BY e.expires_at ASC LIMIT 25`,[o]);
+  res.json({...q.rows[0],items:due.rows});
+});
+
+app.get("/api/reports/assurance-summary",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+  const o=req.user!.orgId;
+  const q=await pool.query(`SELECT
+    (SELECT count(*)::int FROM controls WHERE organization_id=$1) controls,
+    (SELECT count(DISTINCT control_id)::int FROM assessments WHERE organization_id=$1) tested_controls,
+    (SELECT count(DISTINCT control_id)::int FROM automation_rules WHERE organization_id=$1) automated_controls,
+    (SELECT count(*)::int FROM findings WHERE organization_id=$1 AND severity='High' AND status NOT IN ('Closed','Resolved')) high_findings,
+    (SELECT count(*)::int FROM evidence WHERE organization_id=$1 AND (status='Expired' OR (expires_at IS NOT NULL AND expires_at<=now()))) stale_evidence,
+    (SELECT count(*)::int FROM controls WHERE organization_id=$1 AND next_due IS NOT NULL AND next_due<=current_date+30) due_30_days`,[o]);
+  const r=q.rows[0], total=Math.max(1,Number(r.controls));
+  res.json({...r,
+    testing_coverage:Math.round(Number(r.tested_controls)/total*100),
+    automation_coverage:Math.round(Number(r.automated_controls)/total*100)
+  });
+});
+
+app.get("/api/reports/audit-pack.csv",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+  const o=req.user!.orgId;
+  const q=await pool.query(`SELECT c.control_code,c.title,c.category,c.framework_ref,c.owner,c.frequency,c.risk_level,c.status,c.last_tested,c.next_due,
+    COALESCE((SELECT a.result FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1),'Not Tested') latest_result,
+    COALESCE((SELECT a.score FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1),0) latest_score,
+    (SELECT count(*)::int FROM evidence e WHERE e.control_id=c.id) evidence_items,
+    (SELECT count(*)::int FROM evidence e WHERE e.control_id=c.id AND e.automated=true) automated_evidence,
+    (SELECT count(*)::int FROM findings f WHERE f.control_id=c.id AND f.status NOT IN ('Closed','Resolved')) open_findings
+    FROM controls c WHERE c.organization_id=$1 ORDER BY c.category,c.control_code`,[o]);
+  const cols=["Control Code","Control Title","Category","Framework Mapping","Owner","Frequency","Risk","Status","Last Tested","Next Due","Latest Result","Latest Score","Evidence Items","Automated Evidence","Open Findings"];
+  const escCsv=(v:any)=>'"'+String(v??"").replace(/"/g,'""')+'"';
+  const csv=[cols.join(","),...q.rows.map(r=>[
+    r.control_code,r.title,r.category,r.framework_ref,r.owner,r.frequency,r.risk_level,r.status,
+    r.last_tested,r.next_due,r.latest_result,r.latest_score,r.evidence_items,r.automated_evidence,r.open_findings
+  ].map(escCsv).join(","))].join("\n");
+  await audit(req.user!,"EXPORT","audit_pack",null,{format:"csv",controls:q.rowCount});
+  res.setHeader("Content-Type","text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition",'attachment; filename="revolt-x-it-controls-audit-pack.csv"');
+  res.send(csv);
+});
+
 app.get("/api/audit",auth,permit("audit.read"),async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT a.*,u.name user_name,u.email FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id
     WHERE a.organization_id=$1 ORDER BY a.created_at DESC LIMIT 250`,[req.user!.orgId]); res.json(q.rows);
