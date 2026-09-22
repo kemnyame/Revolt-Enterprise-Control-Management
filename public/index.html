@@ -117,8 +117,9 @@
       </section>
 
       <section class="page hidden" id="reportsPage">
-        <div class="page-toolbar"><div><span class="eyebrow">CONTROL INTELLIGENCE</span><h1>Control Health</h1><p>Combine test results, current evidence, findings and due dates into one assurance view.</p></div></div>
+        <div class="page-toolbar"><div><span class="eyebrow">CONTROL INTELLIGENCE</span><h1>Control Health</h1><p>Combine test results, current evidence, findings, framework coverage and due dates into one assurance view.</p></div><button class="btn primary" id="auditPackBtn">Download Audit Pack</button></div>
         <div class="report-summary" id="reportSummary"></div>
+        <div class="two-col"><section class="panel"><div class="panel-head"><div><small>FRAMEWORK CROSSWALK</small><h3>Coverage by framework</h3></div></div><div id="frameworkCoverage" class="bar-list"></div></section><section class="panel"><div class="panel-head"><div><small>EVIDENCE HYGIENE</small><h3>Evidence freshness</h3></div></div><div id="evidenceFreshness"></div></section></div>
         <div class="table-card"><table><thead><tr><th>Control</th><th>Domain</th><th>Risk</th><th>Score</th><th>Result</th><th>Current evidence</th><th>Open findings</th><th>Next due</th></tr></thead><tbody id="reportBody"></tbody></table></div>
       </section>
 
