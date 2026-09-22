@@ -6,7 +6,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "build": "node --check public/app.js && tsc",
     "start": "npm run build && node dist/server.js"
   },
   "engines": {
