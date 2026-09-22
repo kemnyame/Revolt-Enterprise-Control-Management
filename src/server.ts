@@ -86,11 +86,11 @@ async function githubApi(pathname:string,token:string){
 }
 
 const permissions: Record<string,string[]> = {
-  admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","users.write","settings.read","settings.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
-  control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","users.read","integrations.read","automation.read","automation.write","reports.read"],
+  admin:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","evidence.review","findings.read","findings.write","audit.read","users.read","users.write","settings.read","settings.write","integrations.read","integrations.write","automation.read","automation.write","reports.read"],
+  control_manager:["dashboard.read","controls.read","controls.write","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","evidence.review","findings.read","findings.write","audit.read","users.read","integrations.read","automation.read","automation.write","reports.read"],
   control_officer:["dashboard.read","controls.read","assessments.read","assessments.write","evidence.read","evidence.write","findings.read","findings.write","integrations.read","automation.read"],
-  auditor:["dashboard.read","controls.read","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
-  reviewer:["dashboard.read","controls.read","assessments.read","assessments.review","evidence.read","evidence.write","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
+  auditor:["dashboard.read","controls.read","assessments.read","assessments.write","assessments.review","evidence.read","evidence.write","evidence.review","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
+  reviewer:["dashboard.read","controls.read","assessments.read","assessments.review","evidence.read","evidence.write","evidence.review","findings.read","findings.write","audit.read","integrations.read","automation.read","reports.read"],
   viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","integrations.read","automation.read","reports.read"]
 };
 
@@ -606,7 +606,12 @@ app.post("/api/controls",auth,permit("controls.write"),async(req:AuthedRequest,r
   const schema=z.object({control_code:z.string().min(3),title:z.string().min(3),description:z.string().default(""),category:z.string().min(2),framework_ref:z.string().default(""),owner:z.string().default(""),assigned_user_id:z.number().int().nullable().optional(),frequency:z.string().default("Quarterly"),risk_level:z.enum(["Low","Medium","High"]),evidence_required:z.string().default("")});
   const p=schema.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Please complete the required control fields",details:p.error.flatten()});
   try{
-    const d=p.data; const q=await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,assigned_user_id,frequency,risk_level,evidence_required,next_due)
+    const d=p.data;
+    if(d.assigned_user_id){
+      const assignee=await pool.query("SELECT id FROM users WHERE id=$1 AND organization_id=$2 AND status='active' AND role IN ('control_manager','control_officer')",[d.assigned_user_id,req.user!.orgId]);
+      if(!assignee.rowCount)return res.status(400).json({error:"Assigned officer must be an active Control Manager or Control Officer in this workspace"});
+    }
+    const q=await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,assigned_user_id,frequency,risk_level,evidence_required,next_due)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,current_date + interval '30 days') RETURNING *`,
       [req.user!.orgId,d.control_code,d.title,d.description,d.category,d.framework_ref,d.owner,d.assigned_user_id??null,d.frequency,d.risk_level,d.evidence_required]);
     await audit(req.user!,"CREATE","control",q.rows[0].id,{code:d.control_code}); res.status(201).json(q.rows[0]);
@@ -616,6 +621,10 @@ app.post("/api/controls",auth,permit("controls.write"),async(req:AuthedRequest,r
 app.put("/api/controls/:id",auth,permit("controls.write"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id); const allowed=["title","description","category","framework_ref","owner","assigned_user_id","frequency","status","risk_level","evidence_required","next_due"];
   const fields=allowed.filter(k=>req.body[k]!==undefined); if(!fields.length) return res.status(400).json({error:"No supported fields supplied"});
+  if(req.body.assigned_user_id){
+    const assignee=await pool.query("SELECT id FROM users WHERE id=$1 AND organization_id=$2 AND status='active' AND role IN ('control_manager','control_officer')",[Number(req.body.assigned_user_id),req.user!.orgId]);
+    if(!assignee.rowCount)return res.status(400).json({error:"Assigned officer must be an active Control Manager or Control Officer in this workspace"});
+  }
   const vals=fields.map(k=>req.body[k]); const set=fields.map((k,i)=>`${k}=$${i+3}`).join(",");
   const q=await pool.query(`UPDATE controls SET ${set},updated_at=now() WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,...vals]);
   if(!q.rowCount) return res.status(404).json({error:"Control not found"}); await audit(req.user!,"UPDATE","control",id,{fields}); res.json(q.rows[0]);
@@ -676,7 +685,7 @@ app.post("/api/evidence/:id/verify",auth,permit("evidence.read"),async(req:Authe
   res.json({valid,sha256:calculated});
 });
 
-app.post("/api/evidence/:id/review",auth,permit("evidence.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/evidence/:id/review",auth,permit("evidence.review"),async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
   const s=z.object({review_status:z.enum(["Approved","Rejected","Needs Update"]),review_notes:z.string().default("")});
   const p=s.safeParse(req.body);if(!p.success) return res.status(400).json({error:"Invalid review"});
@@ -720,6 +729,7 @@ app.post("/api/findings",auth,permit("findings.write"),async(req:AuthedRequest,r
   const s=z.object({control_id:z.number().int().nullable().optional(),title:z.string().trim().min(3),description:z.string().default(""),severity:z.enum(["Low","Medium","High"]),status:z.enum(["Open","In Progress"]).default("Open"),owner:z.string().default(""),due_date:z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/),z.literal(""),z.null()]).optional()});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Please check the finding fields",details:p.error.flatten()});
   const d=p.data;
+  if(req.user!.role==="control_officer"&&!d.control_id)return res.status(400).json({error:"Control Officers must link findings to an assigned control"});
   if(d.control_id){
     if(!(await hasControlAccess(req.user!,d.control_id)))return res.status(400).json({error:"The selected control is unavailable or not assigned to you"});
   }
