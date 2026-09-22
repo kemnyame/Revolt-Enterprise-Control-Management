@@ -709,7 +709,7 @@ app.get("/api/findings",auth,permit("findings.read"),async(req:AuthedRequest,res
 });
 
 app.post("/api/findings",auth,permit("findings.write"),async(req:AuthedRequest,res)=>{
-  const s=z.object({control_id:z.number().int().nullable().optional(),title:z.string().trim().min(3),description:z.string().default(""),severity:z.enum(["Low","Medium","High"]),status:z.enum(["Open","In Progress"]).default("Open"),owner:z.string().default(""),due_date:z.union([z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/),z.literal(""),z.null()]).optional()});
+  const s=z.object({control_id:z.number().int().nullable().optional(),title:z.string().trim().min(3),description:z.string().default(""),severity:z.enum(["Low","Medium","High"]),status:z.enum(["Open","In Progress"]).default("Open"),owner:z.string().default(""),due_date:z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/),z.literal(""),z.null()]).optional()});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Please check the finding fields",details:p.error.flatten()});
   const d=p.data;
   if(d.control_id){
@@ -1103,8 +1103,8 @@ app.get("/api/reports/audit-pack.zip",auth,permit("reports.read"),async(req:Auth
       FROM evidence_files f JOIN evidence e ON e.file_id=f.id JOIN controls c ON c.id=e.control_id
       WHERE f.organization_id=$1 ORDER BY c.control_code,f.id`,[o])
   ]);
-  const escCsv=(v:any)=>'"'+String(v??"").replace(/"/g,'""').replace(/\\r?\\n/g," ")+'"';
-  const csv=(rows:any[],cols:[string,string][])=>[cols.map(x=>escCsv(x[0])).join(","),...rows.map(r=>cols.map(x=>escCsv(r[x[1]])).join(","))].join("\\n");
+  const escCsv=(v:any)=>'"'+String(v??"").replace(/"/g,'""').replace(/\r?\n/g," ")+'"';
+  const csv=(rows:any[],cols:[string,string][])=>[cols.map(x=>escCsv(x[0])).join(","),...rows.map(r=>cols.map(x=>escCsv(r[x[1]])).join(","))].join("\n");
   const controlCols:any=[["Control Code","control_code"],["Title","title"],["Category","category"],["Framework","framework_ref"],["Owner","owner"],["Assigned Officer","assigned_user_name"],["Frequency","frequency"],["Risk","risk_level"],["Status","status"],["Last Tested","last_tested"],["Next Due","next_due"],["Latest Result","latest_result"],["Latest Score","latest_score"],["Evidence Items","evidence_items"],["Open Findings","open_findings"]];
   const evidenceCols:any=[["ID","id"],["Control","control_code"],["Control Title","control_title"],["Evidence Title","title"],["Type","evidence_type"],["Source","source"],["Period","period"],["Status","status"],["Automated","automated"],["Collected","collected_at"],["Expires","expires_at"],["SHA-256","sha256"],["Review Status","review_status"],["File Name","original_name"],["MIME Type","mime_type"],["Size Bytes","size_bytes"]];
   const testCols:any=[["ID","id"],["Control","control_code"],["Control Title","control_title"],["Period","period"],["Result","result"],["Score","score"],["Objective","test_objective"],["Procedure","test_procedure"],["Sample Size","sample_size"],["Exceptions","exception_count"],["Design Effective","design_effective"],["Operating Effective","operating_effective"],["Tester","tester_name"],["Review Status","review_status"],["Reviewer","reviewer_name"],["Review Notes","review_notes"],["Tested At","tested_at"]];
