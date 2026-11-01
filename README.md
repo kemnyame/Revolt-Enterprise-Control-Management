@@ -30,7 +30,7 @@ Use Node 24. Set `DATABASE_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `JWT_SECRET`, 
 
 `npm ci`, `npm run build`, `npm test`, `npm run dev`.
 
-Production `npm start` first runs a release gate against `TEST_DATABASE_URL`, which must point to a separate Neon branch. HTTP integration checks cover customer isolation, all work modules, evidence, independent approval, concurrency, import/renewal deduplication, reports, closure, notification claims and session invalidation. Production startup does not create or delete smoke-test records in the live database.
+The install/build phase runs a release gate against `TEST_DATABASE_URL`, which must point to a separate Neon branch. HTTP integration checks cover customer isolation, all work modules, evidence, independent approval, concurrency, import/renewal deduplication, reports, closure, notification claims and session invalidation. Production `npm start` starts the compiled server directly. Cold starts do not rebuild or rerun the release suite, and never create or delete smoke-test records in the live database.
 
 Retained validated connectors: GitHub, Entra ID, Microsoft 365, Jira, ServiceNow, Splunk, Tenable and CrowdStrike. Provider credentials are encrypted with the dedicated integration encryption key.
 

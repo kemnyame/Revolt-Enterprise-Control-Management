@@ -98,6 +98,8 @@ const permissions: Record<string,string[]> = {
   viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","integrations.read","automation.read","reports.read"]
 };
 
+async function findingNotice(user:TokenPayload,finding:any){if(!finding.owner_user_id||finding.is_sample)return;const q=await pool.query("SELECT email FROM users WHERE id=$1 AND organization_id=$2 AND status='active' AND notify_email",[finding.owner_user_id,user.orgId]);if(q.rowCount)await queueNotice(pool,user.orgId,q.rows[0].email,'Revolt-X finding: '+finding.title,'An IT control finding has been assigned or updated.\n\n'+finding.title+'\nStatus: '+finding.status+'\nSeverity: '+finding.severity+'\nOpen your private workspace: https://revolt-enterprise-control-management.onrender.com','assignment','finding:'+finding.id+':'+new Date(finding.updated_at||finding.created_at).toISOString())}
+
 function sessionCookie(req:Request){const cookie=String(req.headers.cookie||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('ecm_session='));return cookie?decodeURIComponent(cookie.slice(12)):''}
 function setSessionCookie(res:Response,token:string){res.cookie('ecm_session',token,{httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'strict',path:'/',maxAge:8*60*60*1000})}
 async function auth(req:AuthedRequest,res:Response,next:NextFunction){
@@ -511,6 +513,7 @@ app.post("/api/controls/:id/test",auth,permit("assessments.write"),asyncRoute(as
     if(ev.rowCount!==p.data.evidence_ids.length) return res.status(400).json({error:"One or more selected evidence items do not belong to this control"});
   }
   const d=p.data;
+  if(d.retest_of){const prior=await pool.query('SELECT id FROM assessments WHERE id=$1 AND organization_id=$2 AND control_id=$3 AND NOT is_sample',[d.retest_of,req.user!.orgId,controlId]);if(!prior.rowCount)return res.status(400).json({error:'The referenced test is unavailable for this control'});}
   const q=await pool.query(`INSERT INTO assessments(organization_id,control_id,tester_id,period,result,score,notes,test_objective,test_procedure,sample_size,exception_count,evidence_ids,design_effective,operating_effective,retest_of)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15) RETURNING *`,[
       req.user!.orgId,controlId,req.user!.id,d.period,d.result,d.score,d.notes,d.test_objective,d.test_procedure,d.sample_size??null,d.exception_count,JSON.stringify(d.evidence_ids),d.design_effective??null,d.operating_effective??null,d.retest_of??null
@@ -635,7 +638,7 @@ app.post("/api/evidence",auth,permit("evidence.write"),asyncRoute(async(req:Auth
   const s=z.object({control_id:z.number().int(),assessment_id:z.number().int().nullable().optional(),title:z.string().min(2),evidence_type:z.string().default("Document"),source:z.string().default("Manual Upload"),url:z.string().default(""),period:z.string().default(""),status:z.string().default("Current")});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid evidence data",details:p.error.flatten()});
   if(!(await hasControlAccess(req.user!,p.data.control_id))) return res.status(404).json({error:"Control not found or not assigned to you"});
-  const d=p.data; const q=await pool.query(`INSERT INTO evidence(organization_id,control_id,assessment_id,title,evidence_type,source,url,period,status,uploaded_by)
+  const d=p.data;if(d.assessment_id){const prior=await pool.query('SELECT id FROM assessments WHERE id=$1 AND organization_id=$2 AND control_id=$3 AND NOT is_sample',[d.assessment_id,req.user!.orgId,d.control_id]);if(!prior.rowCount)return res.status(400).json({error:'The referenced test is unavailable for this control'});} const q=await pool.query(`INSERT INTO evidence(organization_id,control_id,assessment_id,title,evidence_type,source,url,period,status,uploaded_by)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,[req.user!.orgId,d.control_id,d.assessment_id??null,d.title,d.evidence_type,d.source,d.url,d.period,d.status,req.user!.id]);
   await audit(req.user!,"ADD_EVIDENCE","control",d.control_id,{evidenceId:q.rows[0].id,title:d.title}); res.status(201).json(q.rows[0]);
 }));
@@ -658,7 +661,7 @@ app.post("/api/findings",auth,permit("findings.write"),asyncRoute(async(req:Auth
     const q=await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date,owner_user_id,root_cause,recommendation,completion_notes,updated_at)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now()) RETURNING *`,[req.user!.orgId,d.control_id??null,d.title,d.description,d.severity,d.status,owner,d.due_date||null,d.owner_user_id||null,d.root_cause,d.recommendation,d.completion_notes]);
     await audit(req.user!,"CREATE","finding",q.rows[0].id,{severity:d.severity,controlId:d.control_id??null,status:d.status});
-    res.status(201).json(q.rows[0]);
+    await findingNotice(req.user!,q.rows[0]);res.status(201).json(q.rows[0]);
   }catch(err:any){console.error("Create finding failed",err);res.status(500).json({error:"Unable to save finding"});}
 }));
 
@@ -674,7 +677,7 @@ app.put("/api/findings/:id",auth,permit("findings.write"),asyncRoute(async(req:A
     if(!pass.rowCount)return res.status(409).json({error:"An independently reviewed passing retest is required before closure"});
   }
   const q=await pool.query(`UPDATE findings SET title=$3,status=$4,severity=$5,owner=$6,owner_user_id=$7,due_date=$8,description=$9,root_cause=$10,recommendation=$11,completion_notes=$12,updated_at=now(),resolved_at=CASE WHEN $4 IN ('Closed','Resolved') THEN now() ELSE NULL END WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,d.title,d.status,d.severity,owner,d.owner_user_id||null,d.due_date||null,d.description,d.root_cause,d.recommendation,d.completion_notes]);
-  await audit(req.user!,"UPDATE","finding",id,{status:d.status,ownerId:d.owner_user_id});res.json(q.rows[0]);
+  await audit(req.user!,"UPDATE","finding",id,{status:d.status,ownerId:d.owner_user_id});await findingNotice(req.user!,q.rows[0]);res.json(q.rows[0]);
 }));
 
 app.post("/api/integrations/github/connect",auth,permit("integrations.write"),asyncRoute(async(req:AuthedRequest,res)=>{

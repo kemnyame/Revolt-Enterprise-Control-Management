@@ -3,7 +3,7 @@ services:
     name: Revolt-Enterprise-Control-Management
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
@@ -26,4 +26,4 @@ services:
       - key: INTEGRATION_ENCRYPTION_KEY
         generateValue: true
       - key: GMAIL_RELAY_ACTIVE
-        value: "0"
+        sync: false
