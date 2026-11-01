@@ -1,61 +1,37 @@
-# Revolt-X Enterprise Control Management
+# Revolt-X IT Control Management 2.0
 
-Production-oriented enterprise assurance platform with **IT Controls** as the first commercial module.
+Organisation-scoped IT assurance and technology operations platform. Plans, risks, a 77-control library, audits/reviews, control testing, evidence, findings/remediation, SLAs, assets, licence renewals, change management, PDF/Excel/CSV reporting and audit packs.
 
-## Production application
+Customer administrators can create users with unique 24-hour temporary passwords. First sign-in requires a personal password. The platform administrator can provision isolated organisations and manage subscription periods. Expired subscriptions are read-only; suspended customers cannot access operational records. Subscription billing and payment collection are managed externally.
 
-- Multi-tenant organisation-scoped PostgreSQL model
-- JWT authentication with hashed passwords and role-based permissions
-- Control register and 77-control IT control library
-- Evidence vault with source-file storage, SHA-256 fingerprints, evidence review and integrity verification
-- Test Control workflow with objective, procedure, sample, evidence selection, design/operating effectiveness, score and findings
-- Findings and remediation with passing-retest requirement before closure
-- Reviewer sign-off for control tests
-- Full audit trail
-- Organisation and user administration
-- Framework mapping, evidence freshness, control-health reporting and audit-pack export
-- In-app user manual
-- Responsive original Revolt-X Control interface
-- CSP, restricted CORS, verified database TLS and API/login rate limits
+## Control workflow
 
-## Live direct connector adapters
+- Named accountable owners and independent reviewers.
+- Approval and closure gates, evidence requirements, optimistic locking and idempotent requests.
+- Uploaded source bytes and SHA-256 integrity fingerprints.
+- Findings require a subsequent independently reviewed passing retest before closure.
+- Append-only commercial decisions and recorded core audit actions.
+- Sample scenarios are labelled, read-only and excluded from operational notifications.
+- Customer workspaces receive control and connector definitions, without another customer's records.
 
-The platform never marks a connector **Connected** until the provider validates the supplied credential.
+## Licence register
 
-- GitHub
-- Microsoft Entra ID
-- Microsoft 365
-- Jira
-- ServiceNow
-- Splunk
-- Tenable
-- CrowdStrike Falcon
+The original 14-column ICDD Excel/CSV format is supported, with preview, row-specific validation, duplicate prevention, quantities, payment history and renewal history. Reminder preparation starts two calendar months before expiry, clamps month ends, and deduplicates reminder buckets. Actual customer data and credentials do not belong in this public source repository.
 
-Connector secrets are encrypted at rest with a dedicated application encryption key. Provider syncs create structured evidence with SHA-256 hashes and can create control findings when defined exceptions are detected.
+## Email
 
-Other source types remain visible in the connector catalogue for the planned direct adapter or private-network **Revolt-X Connector Agent**. Private network URLs are intentionally blocked from the public cloud connector path.
+Operational and account messages use a database outbox. Enable notifications per organisation. The connected Gmail relay claims eligible messages, submits them using the authorised sender and records the actual provider ID. `GMAIL_RELAY_ACTIVE=1` indicates that the separate delivery task is enabled. Queueing is not delivery. Uncertain attempts require review before retrying. Optional immediate SMTP is available using `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`.
 
-## Core assurance lifecycle
+Welcome messages exclude the temporary password; administrators share the credential separately. Reset tokens are hashed at rest, single-use and valid for two hours to accommodate hourly relay processing. Queued reset bodies are scrubbed after submission or expiry. No Gmail OAuth token is copied into this application.
 
-1. Define and assign a control.
-2. Collect and review source evidence.
-3. Test the control and document the procedure.
-4. Raise and assign findings for exceptions.
-5. Remediate and retest.
-6. Close only after validated resolution.
-7. Retain the audit trail and export assurance packs.
+## Running
 
-## Local setup
+Use Node 24. Set `DATABASE_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `JWT_SECRET`, `INTEGRATION_ENCRYPTION_KEY` and `ALLOWED_ORIGINS`. In production use HTTPS and a verified-TLS PostgreSQL connection. The bootstrap password only creates a missing administrator; it never overwrites an existing personal password.
 
-1. Copy `.env.example` to `.env`.
-2. Create PostgreSQL and set `DATABASE_URL`.
-3. Set independent strong values for `JWT_SECRET` and `INTEGRATION_ENCRYPTION_KEY`.
-4. Set `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `ALLOWED_ORIGINS`.
-5. Run `npm install`.
-6. Run `npm run dev`.
+`npm ci`, `npm run build`, `npm test`, `npm run dev`.
 
-The application initializes its schema and seeds the IT control and connector catalogue on an empty organisation.
+Production `npm start` first runs a release gate against `TEST_DATABASE_URL`, which must point to a separate Neon branch. HTTP integration checks cover customer isolation, all work modules, evidence, independent approval, concurrency, import/renewal deduplication, reports, closure, notification claims and session invalidation. Production startup does not create or delete smoke-test records in the live database.
 
-## Deployment expectations
+Retained validated connectors: GitHub, Entra ID, Microsoft 365, Jira, ServiceNow, Splunk, Tenable and CrowdStrike. Provider credentials are encrypted with the dedicated integration encryption key.
 
-Production requires HTTPS, verified PostgreSQL TLS, an origin allow-list, protected secrets, and a dedicated database. The application performs an authenticated startup smoke test that validates core read paths plus evidence upload, SHA-256 verification, Test Control and reviewer sign-off, then removes the temporary validation records.
+Framework references in the control catalogue are assessment aids. Application use does not establish certification or regulatory compliance. Set customer-specific assessment criteria and obtain qualified independent assurance when required.

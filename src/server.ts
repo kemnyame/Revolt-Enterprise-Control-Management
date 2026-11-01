@@ -12,12 +12,16 @@ import multer from "multer";
 import crypto from "crypto";
 import archiver from "archiver";
 import { controlCatalog, integrationCatalog } from "./seed";
+import {registerCommercial,SessionUser,queueNotice} from "./commercial-api";
+import {migrateCommercial} from "./commercial-schema";
+import {dispatchSmtp} from "./commercial-notifications";
 import { liveConnectorKeys, connectorFields, validateConnector, collectConnector } from "./connectors";
 
-type TokenPayload = { id:number; orgId:number; role:string; email:string; name:string };
+type TokenPayload = SessionUser;
 type AuthedRequest = Request & { user?: TokenPayload };
 
 const app = express();
+const asyncRoute=(fn:(req:AuthedRequest,res:Response,next:NextFunction)=>any)=>(req:Request,res:Response,next:NextFunction)=>{Promise.resolve(fn(req,res,next)).catch(next)};
 const port = Number(process.env.PORT || 10000);
 const jwtSecret = process.env.JWT_SECRET || (process.env.NODE_ENV === "production" ? "" : "dev-only-change-me");
 if (!jwtSecret) throw new Error("JWT_SECRET is required in production");
@@ -94,15 +98,27 @@ const permissions: Record<string,string[]> = {
   viewer:["dashboard.read","controls.read","assessments.read","evidence.read","findings.read","integrations.read","automation.read","reports.read"]
 };
 
-function auth(req:AuthedRequest,res:Response,next:NextFunction){
-  const header=req.headers.authorization;
-  if(!header?.startsWith("Bearer ")) return res.status(401).json({error:"Authentication required"});
-  try{
-    req.user=jwt.verify(header.slice(7),jwtSecret) as TokenPayload;
-    next();
-  }catch{
-    res.status(401).json({error:"Session expired or invalid"});
+function sessionCookie(req:Request){const cookie=String(req.headers.cookie||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('ecm_session='));return cookie?decodeURIComponent(cookie.slice(12)):''}
+function setSessionCookie(res:Response,token:string){res.cookie('ecm_session',token,{httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'strict',path:'/',maxAge:8*60*60*1000})}
+async function auth(req:AuthedRequest,res:Response,next:NextFunction){
+ try{
+  const bearer=req.headers.authorization?.startsWith('Bearer ')?req.headers.authorization.slice(7):'',token=bearer||sessionCookie(req);
+  if(!token)return res.status(401).json({error:'Authentication required'});
+  const signed=jwt.verify(token,jwtSecret) as TokenPayload;
+  const q=await pool.query('SELECT u.*,o.status AS org_status,o.subscription_expires FROM users u JOIN organizations o ON o.id=u.organization_id WHERE u.id=$1 AND u.email=$2',[signed.id,signed.email]);
+  const u=q.rows[0];if(!u||u.status!=='active'||Number(signed.sessionVersion||1)!==u.session_version)return res.status(401).json({error:'Session expired or access was removed'});
+  if(signed.orgId!==u.organization_id&&!u.platform_admin)return res.status(403).json({error:'Organisation access denied'});
+  if(u.org_status!=='active'&&!u.platform_admin)return res.status(403).json({error:'This organisation is suspended. Contact the platform administrator.'});
+  const authPath=req.path.startsWith('/api/auth/');
+  req.user={id:u.id,orgId:signed.orgId,role:u.role,email:u.email,name:u.name,mustChange:u.must_change_password,platformAdmin:u.platform_admin,sessionVersion:u.session_version,subscriptionExpired:!!u.subscription_expires&&new Date(u.subscription_expires).toISOString().slice(0,10)<new Date().toISOString().slice(0,10)};
+  if(u.must_change_password&&u.temporary_password_expires&&new Date(u.temporary_password_expires)<new Date())return res.status(401).json({error:'The temporary password expired. Ask an admin to issue a new one.'});
+  if(u.must_change_password&&!['/api/auth/me','/api/auth/change-password','/api/auth/logout'].includes(req.path))return res.status(403).json({error:'Set your personal password before opening the workspace.',code:'PASSWORD_CHANGE_REQUIRED'});
+  if(req.user.subscriptionExpired&&!u.platform_admin&&!authPath&&!['GET','HEAD'].includes(req.method))return res.status(403).json({error:'The workspace subscription expired. It is read-only until renewed.'});
+  if(!bearer&&!['GET','HEAD','OPTIONS'].includes(req.method)){
+   const origin=req.headers.origin;if(!origin||!(allowedOrigins.includes(origin)||process.env.NODE_ENV!=='production'&&origin===`http://localhost:${port}`))return res.status(403).json({error:'Request origin could not be verified.'});
   }
+  next();
+ }catch(err){if(err instanceof jwt.JsonWebTokenError||err instanceof jwt.TokenExpiredError)return res.status(401).json({error:'Session expired or invalid'});next(err)}
 }
 
 function permit(permission:string){
@@ -304,6 +320,7 @@ async function initDb(){
     CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_logs(organization_id);
   `);
 
+  await migrateCommercial(pool);
   const adminEmail = process.env.ADMIN_EMAIL || (process.env.NODE_ENV !== "production" ? "admin@revoltx.local" : "");
   const adminPassword = process.env.ADMIN_PASSWORD || (process.env.NODE_ENV !== "production" ? "ChangeMe!234" : "");
   if(!adminEmail || !adminPassword) throw new Error("ADMIN_EMAIL and ADMIN_PASSWORD are required");
@@ -315,141 +332,50 @@ async function initDb(){
     orgId=created.rows[0].id;
   } else orgId=org.rows[0].id;
 
-  const hash=await bcrypt.hash(adminPassword,12);
-  await pool.query("UPDATE organizations SET name='Revolt-X Enterprise Control Management' WHERE id=$1 AND name ILIKE '%demo%'",[orgId]);
-
-  const existing=await pool.query("SELECT id FROM users WHERE lower(email)=lower($1)",[adminEmail]);
-  if(!existing.rowCount){
-    await pool.query("INSERT INTO users(organization_id,name,email,password_hash,role,status) VALUES($1,$2,$3,$4,'admin','active')",[
-      orgId, process.env.ADMIN_NAME || "Platform Administrator", adminEmail, hash
-    ]);
-  } else {
-    await pool.query("UPDATE users SET organization_id=$1,name=$2,password_hash=$3,role='admin',status='active' WHERE lower(email)=lower($4)",[
-      orgId, process.env.ADMIN_NAME || "Platform Administrator", hash, adminEmail
-    ]);
-  }
-  const adminCheck=await pool.query("SELECT password_hash FROM users WHERE lower(email)=lower($1)",[adminEmail]);
-  if(!adminCheck.rowCount || !(await bcrypt.compare(adminPassword,adminCheck.rows[0].password_hash))) {
-    throw new Error("Admin credential self-check failed");
-  }
-  console.log("Admin credential self-check passed");
+  const existing=await pool.query('SELECT id FROM users WHERE lower(email)=lower($1)',[adminEmail]);
+  if(!existing.rowCount){const hash=await bcrypt.hash(adminPassword,12);await pool.query("INSERT INTO users(organization_id,name,email,password_hash,role,status,must_change_password,temporary_password_expires,platform_admin) VALUES($1,$2,$3,$4,'admin','active',true,now()+interval '24 hours',true)",[orgId,process.env.ADMIN_NAME||'Platform Administrator',adminEmail,hash])}
+  // Existing personal passwords and customer settings must survive restarts.
 
   for(const item of controlCatalog){
     await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,frequency,risk_level,evidence_required,next_due)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,current_date + interval '30 days')
-      ON CONFLICT(organization_id,control_code) DO UPDATE SET title=excluded.title,description=excluded.description,category=excluded.category,
-      framework_ref=excluded.framework_ref,owner=excluded.owner,frequency=excluded.frequency,risk_level=excluded.risk_level,evidence_required=excluded.evidence_required,updated_at=now()`,
+      ON CONFLICT(organization_id,control_code) DO NOTHING`,
       [orgId,item.code,item.title,item.description,item.category,item.framework,item.owner,item.frequency,item.risk,item.evidence]);
   }
 
   for(const item of integrationCatalog){
     await pool.query(`INSERT INTO integrations(organization_id,provider_key,name,category,auth_type,capabilities)
       VALUES($1,$2,$3,$4,$5,$6::jsonb)
-      ON CONFLICT(organization_id,provider_key) DO UPDATE SET name=excluded.name,category=excluded.category,auth_type=excluded.auth_type,capabilities=excluded.capabilities`,
+      ON CONFLICT(organization_id,provider_key) DO NOTHING`,
       [orgId,item.key,item.name,item.category,item.authType,JSON.stringify(item.capabilities)]);
   }
 
-  const demoCount=await pool.query("SELECT count(*)::int AS count FROM assessments WHERE organization_id=$1",[orgId]);
-  if(Number(demoCount.rows[0].count)===0){
-    const controlRows=await pool.query("SELECT id,control_code FROM controls WHERE organization_id=$1",[orgId]);
-    const byCode=Object.fromEntries(controlRows.rows.map((r:any)=>[r.control_code,r.id]));
-    const samples:any[]=[
-      ["IAM-003","Q3 2026","Effective",94,"Privileged recertification completed; dormant elevated accounts removed."],
-      ["CHG-001","Q3 2026","Effective",91,"Sampled production changes had approval, testing and implementation evidence."],
-      ["BCK-001","September 2026","Partially Effective",78,"Two failed jobs exceeded escalation SLA before successful recovery."],
-      ["VUL-002","September 2026","Ineffective",57,"Critical vulnerability remediation exceeded policy SLA for internet-facing assets."],
-      ["NET-001","Q3 2026","Partially Effective",74,"Legacy firewall rules require renewed business-owner justification."],
-      ["LOG-001","Q3 2026","Effective",89,"Critical log sources are centrally ingested with required retention."],
-      ["END-001","September 2026","Effective",96,"EDR coverage is above target with small number of stale devices."],
-      ["PAT-001","September 2026","Partially Effective",81,"Server patching meets target; endpoint backlog requires follow-up."],
-      ["DB-001","Q3 2026","Effective",92,"Database privileged roles were reviewed and unnecessary grants revoked."],
-      ["CLD-002","September 2026","Partially Effective",79,"Cloud role review identified excessive permissions awaiting remediation."],
-      ["TPR-002","Q3 2026","Effective",87,"Critical vendor assurance artefacts reviewed and current."],
-      ["BCP-003","2026 Annual","Partially Effective",76,"Recovery exercise completed but one dependency exceeded RTO."]
-    ];
-    for(const [code,period,result,score,notes] of samples){
-      if(byCode[code]) await pool.query("INSERT INTO assessments(organization_id,control_id,period,result,score,notes,review_status,tested_at) VALUES($1,$2,$3,$4,$5,$6,'Reviewed',now()-interval '5 days')",[orgId,byCode[code],period,result,score,notes]);
-    }
-
-    const evidenceSamples:any[]=[
-      ["IAM-003","Q3 privileged access recertification","System Report","Microsoft Entra ID","Q3 2026","Current",true],
-      ["CHG-001","Production change approval sample","Approval","ServiceNow","Q3 2026","Current",true],
-      ["BCK-001","Daily backup success dashboard","System Report","Veeam","September 2026","Current",true],
-      ["VUL-002","Critical vulnerability ageing report","System Report","Tenable / Nessus","September 2026","Current",true],
-      ["NET-001","Firewall rule-review workbook","Document","Palo Alto Networks","Q3 2026","Current",false],
-      ["LOG-001","Log source coverage report","System Report","Microsoft Sentinel","Q3 2026","Current",true],
-      ["END-001","EDR sensor health report","System Report","CrowdStrike Falcon","September 2026","Current",true],
-      ["PAT-001","Monthly patch compliance report","System Report","Microsoft Intune","September 2026","Current",true],
-      ["DB-001","Database privileged role export","System Report","PostgreSQL","Q3 2026","Current",true],
-      ["CLD-002","AWS privileged IAM role review","System Report","Amazon Web Services","September 2026","Current",true],
-      ["TPR-002","Critical vendor assurance tracker","Document","Manual Upload","Q3 2026","Current",false],
-      ["BCP-003","DR exercise result and timing log","Document","Manual Upload","2026 Annual","Current",false],
-      ["SDLC-003","Protected branch and PR approval sample","System Report","GitHub","Q3 2026","Current",true],
-      ["EMAIL-002","DMARC aggregate compliance summary","System Report","Microsoft 365","September 2026","Current",true],
-      ["CFG-001","Server baseline compliance report","System Report","Microsoft Defender for Endpoint","September 2026","Current",true]
-    ];
-    for(const [code,title,evidenceType,source,period,status,automated] of evidenceSamples){
-      if(byCode[code]) await pool.query("INSERT INTO evidence(organization_id,control_id,title,evidence_type,source,period,status,automated,collected_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()-interval '2 days',now()+interval '28 days')",[orgId,byCode[code],title,evidenceType,source,period,status,automated]);
-    }
-
-    const findingsSamples:any[]=[
-      ["VUL-002","Critical vulnerability remediation outside SLA","Four critical vulnerabilities exceeded approved remediation timelines.","High","Open","Vulnerability Manager",14],
-      ["BCK-001","Backup failure escalation evidence incomplete","Two failed jobs were recovered but escalation evidence was incomplete.","Medium","In Progress","Infrastructure Manager",21],
-      ["NET-001","Legacy firewall rules require business revalidation","A subset of legacy rules lacks recent owner justification.","Medium","Open","Network Manager",30],
-      ["CLD-002","Excessive cloud permissions identified","Two administrative cloud roles exceed current job responsibilities.","High","In Progress","Cloud Security Lead",10],
-      ["PAT-001","Endpoint patch backlog above target","A set of remote endpoints is outside the approved patch threshold.","Medium","Open","Endpoint Manager",20],
-      ["BCP-003","Recovery dependency exceeded RTO","One supporting service caused the exercise to exceed the target RTO.","High","Open","BCM Manager",45],
-      ["TPR-002","Vendor assurance report nearing expiry","A critical SaaS vendor assurance report needs renewal.","Low","Open","Vendor Risk Manager",60],
-      ["SDLC-004","Legacy repository secret requires rotation","A historical credential was detected in repository history and needs rotation.","High","In Progress","DevOps Lead",7]
-    ];
-    for(const [code,title,description,severity,status,owner,days] of findingsSamples){
-      if(byCode[code]) await pool.query("INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date) VALUES($1,$2,$3,$4,$5,$6,$7,current_date + ($8 || ' days')::interval)",[orgId,byCode[code],title,description,severity,status,owner,days]);
-    }
-
-    const integrationRows=await pool.query("SELECT id,provider_key FROM integrations WHERE organization_id=$1",[orgId]);
-    const byIntegration=Object.fromEntries(integrationRows.rows.map((r:any)=>[r.provider_key,r.id]));
-    const rules:any[]=[
-      ["IAM-003","microsoft-entra","Collect privileged role assignments","Weekly"],
-      ["IAM-005","microsoft-entra","Collect MFA coverage","Daily"],
-      ["SDLC-003","github","Collect protected branch and PR approval evidence","Daily"],
-      ["CHG-001","servicenow","Collect approved production changes","Daily"],
-      ["VUL-002","tenable","Collect critical vulnerability ageing","Daily"],
-      ["END-001","crowdstrike","Collect endpoint sensor health","Daily"],
-      ["LOG-001","microsoft-sentinel","Collect log-source coverage","Daily"],
-      ["BCK-001","veeam","Collect backup job success/failure","Daily"],
-      ["CLD-002","aws","Collect privileged IAM role inventory","Daily"],
-      ["PAT-001","intune","Collect patch compliance","Weekly"],
-      ["DB-001","postgresql","Collect privileged database roles","Weekly"],
-      ["EMAIL-002","microsoft-365","Collect email-authentication posture","Weekly"]
-    ];
-    for(const [code,key,name,schedule] of rules){
-      if(byCode[code]&&byIntegration[key]) await pool.query("INSERT INTO automation_rules(organization_id,control_id,integration_id,name,schedule,status) VALUES($1,$2,$3,$4,$5,'Ready')",[orgId,byCode[code],byIntegration[key],name,schedule]);
-    }
-  }
 }
-app.get("/api/health",async(_req,res)=>{
-  try{ await pool.query("SELECT 1"); res.json({status:"ok",database:"ready",service:"Revolt-X Enterprise Control Management"}); }
-  catch(e){ res.status(503).json({status:"error",database:"unavailable"}); }
-});
 
-app.post("/api/auth/login",async(req,res)=>{
+app.get("/api/health",asyncRoute(async(_req,res)=>{
+  try{ await pool.query("SELECT 1"); res.json({status:"ok",database:"ready",service:"Revolt-X IT Control Management",version:"2.0.0",modules:12}); }
+  catch(e){ res.status(503).json({status:"error",database:"unavailable"}); }
+}));
+
+app.post("/api/auth/login",asyncRoute(async(req,res)=>{
   const schema=z.object({email:z.string().email(),password:z.string().min(6)});
   const parsed=schema.safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:"Enter a valid email and password"});
   const found=await pool.query("SELECT * FROM users WHERE lower(email)=lower($1) AND status='active'",[parsed.data.email]);
   if(!found.rowCount || !(await bcrypt.compare(parsed.data.password,found.rows[0].password_hash))) return res.status(401).json({error:"Invalid email or password"});
   const u=found.rows[0];
-  const payload:TokenPayload={id:u.id,orgId:u.organization_id,role:u.role,email:u.email,name:u.name};
+  if(u.must_change_password&&u.temporary_password_expires&&new Date(u.temporary_password_expires)<new Date())return res.status(401).json({error:'Temporary password expired. Ask an admin to issue another.'});
+  const payload:TokenPayload={id:u.id,orgId:u.organization_id,role:u.role,email:u.email,name:u.name,mustChange:u.must_change_password,platformAdmin:u.platform_admin,sessionVersion:u.session_version};
   const token=jwt.sign(payload,jwtSecret,{expiresIn:"8h"});
   const remote=req.socket.remoteAddress||"";
   const internalSmoke=req.headers["x-revolt-smoke-test"]==="1" && ["127.0.0.1","::1","::ffff:127.0.0.1"].includes(remote);
   if(!internalSmoke) await audit(payload,"LOGIN","session",null,{});
-  res.json({token,user:payload,permissions:permissions[u.role]||[]});
-});
+  setSessionCookie(res,token);res.json({token,user:payload,permissions:permissions[u.role]||[]});
+}));
 
 app.get("/api/auth/me",auth,(req:AuthedRequest,res)=>res.json({user:req.user,permissions:permissions[req.user!.role]||[]}));
 
-app.get("/api/dashboard",auth,permit("dashboard.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/dashboard",auth,permit("dashboard.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const o=req.user!.orgId;
   const [controls,tests,evidence,findings,byCategory,recent]=await Promise.all([
     pool.query("SELECT count(*)::int total, count(*) FILTER (WHERE risk_level='High')::int high_risk FROM controls WHERE organization_id=$1",[o]),
@@ -466,9 +392,9 @@ app.get("/api/dashboard",auth,permit("dashboard.read"),async(req:AuthedRequest,r
     effectiveness: tested ? Math.round(effective/tested*100) : 0,
     categories:byCategory.rows, recentActivity:recent.rows
   });
-});
+}));
 
-app.get("/api/dashboard/progress",auth,permit("dashboard.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/dashboard/progress",auth,permit("dashboard.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const period=String(req.query.period||"quarter");
   const frequency=String(req.query.frequency||"");
   if(!["month","quarter","year"].includes(period)) return res.status(400).json({error:"Period must be month, quarter or year"});
@@ -509,15 +435,15 @@ app.get("/api/dashboard/progress",auth,permit("dashboard.read"),async(req:Authed
     summary:{total,completed:count("Completed"),in_progress:count("In Progress"),overdue:count("Overdue"),not_started:count("Not Started"),completion_percent:total?Math.round(count("Completed")/total*100):0,activity_percent:total?Math.round(items.reduce((s:number,x:any)=>s+x.progress,0)/total):0},
     by_frequency:byFrequency,by_officer:byOfficer,items
   });
-});
+}));
 
-app.get("/api/control-library",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/control-library",auth,permit("controls.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const active=await pool.query("SELECT control_code FROM controls WHERE organization_id=$1",[req.user!.orgId]);
   const activeSet=new Set(active.rows.map((r:any)=>r.control_code));
   res.json(controlCatalog.map(item=>({...item,active:activeSet.has(item.code)})));
-});
+}));
 
-app.post("/api/control-library/:code/add",auth,permit("controls.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/control-library/:code/add",auth,permit("controls.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const item=controlCatalog.find(x=>x.code===req.params.code);
   if(!item) return res.status(404).json({error:"Control template not found"});
   try{
@@ -526,9 +452,9 @@ app.post("/api/control-library/:code/add",auth,permit("controls.write"),async(re
       [req.user!.orgId,item.code,item.title,item.description,item.category,item.framework,item.owner,item.frequency,item.risk,item.evidence]);
     await audit(req.user!,"ADD_FROM_LIBRARY","control",q.rows[0].id,{code:item.code});res.status(201).json(q.rows[0]);
   }catch(e:any){res.status(409).json({error:e.code==="23505"?"This control is already in the register":"Unable to add control"});}
-});
+}));
 
-app.get("/api/controls",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/controls",auth,permit("controls.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const {search="",category="",risk=""}=req.query as Record<string,string>;
   const out=await pool.query(`SELECT c.*,au.name assigned_user_name,au.email assigned_user_email,
     (SELECT result FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1) latest_result,
@@ -540,9 +466,9 @@ app.get("/api/controls",auth,permit("controls.read"),async(req:AuthedRequest,res
     AND ($5::boolean=false OR c.assigned_user_id=$6)
     ORDER BY c.control_code`,[req.user!.orgId,search,category,risk,req.user!.role==="control_officer",req.user!.id]);
   res.json(out.rows);
-});
+}));
 
-app.get("/api/controls/:id",auth,permit("controls.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/controls/:id",auth,permit("controls.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
   const control=await pool.query("SELECT c.*,u.name assigned_user_name,u.email assigned_user_email FROM controls c LEFT JOIN users u ON u.id=c.assigned_user_id WHERE c.id=$1 AND c.organization_id=$2 AND ($3::boolean=false OR c.assigned_user_id=$4)",[id,req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
   if(!control.rowCount) return res.status(404).json({error:"Control not found"});
@@ -556,9 +482,9 @@ app.get("/api/controls/:id",auth,permit("controls.read"),async(req:AuthedRequest
     pool.query("SELECT * FROM findings WHERE organization_id=$1 AND control_id=$2 ORDER BY created_at DESC",[req.user!.orgId,id])
   ]);
   res.json({control:control.rows[0],evidence:evidence.rows,tests:tests.rows,findings:findings.rows});
-});
+}));
 
-app.post("/api/controls/:id/test",auth,permit("assessments.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/controls/:id/test",auth,permit("assessments.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const controlId=Number(req.params.id);
   const schema=z.object({
     period:z.string().min(2),
@@ -568,7 +494,7 @@ app.post("/api/controls/:id/test",auth,permit("assessments.write"),async(req:Aut
     score:z.number().int().min(0).max(100),
     sample_size:z.number().int().min(0).nullable().optional(),
     exception_count:z.number().int().min(0).default(0),
-    evidence_ids:z.array(z.number().int()).default([]),
+    evidence_ids:z.array(z.number().int()).min(1),
     design_effective:z.boolean().nullable().optional(),
     operating_effective:z.boolean().nullable().optional(),
     notes:z.string().default(""),
@@ -581,7 +507,7 @@ app.post("/api/controls/:id/test",auth,permit("assessments.write"),async(req:Aut
   const ctrl=await pool.query("SELECT * FROM controls WHERE id=$1 AND organization_id=$2 AND ($3::boolean=false OR assigned_user_id=$4)",[controlId,req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
   if(!ctrl.rowCount) return res.status(404).json({error:"Control not found or not assigned to you"});
   if(p.data.evidence_ids.length){
-    const ev=await pool.query("SELECT id FROM evidence WHERE organization_id=$1 AND control_id=$2 AND id=ANY($3::int[])",[req.user!.orgId,controlId,p.data.evidence_ids]);
+    const ev=await pool.query("SELECT id FROM evidence WHERE organization_id=$1 AND control_id=$2 AND NOT is_sample AND id=ANY($3::int[])",[req.user!.orgId,controlId,p.data.evidence_ids]);
     if(ev.rowCount!==p.data.evidence_ids.length) return res.status(400).json({error:"One or more selected evidence items do not belong to this control"});
   }
   const d=p.data;
@@ -600,10 +526,10 @@ app.post("/api/controls/:id/test",auth,permit("assessments.write"),async(req:Aut
   }
   await audit(req.user!,"TEST_CONTROL","control",controlId,{assessmentId:q.rows[0].id,result:d.result,evidenceIds:d.evidence_ids,findingId:finding?.id||null});
   res.status(201).json({assessment:q.rows[0],finding});
-});
+}));
 
-app.post("/api/controls",auth,permit("controls.write"),async(req:AuthedRequest,res)=>{
-  const schema=z.object({control_code:z.string().min(3),title:z.string().min(3),description:z.string().default(""),category:z.string().min(2),framework_ref:z.string().default(""),owner:z.string().default(""),assigned_user_id:z.number().int().nullable().optional(),frequency:z.string().default("Quarterly"),risk_level:z.enum(["Low","Medium","High"]),evidence_required:z.string().default("")});
+app.post("/api/controls",auth,permit("controls.write"),asyncRoute(async(req:AuthedRequest,res)=>{
+  const schema=z.object({control_code:z.string().min(3),title:z.string().min(3),description:z.string().default(""),category:z.string().min(2),framework_ref:z.string().default(""),owner:z.string().default(""),assigned_user_id:z.number().int().nullable().optional(),frequency:z.string().default("Quarterly"),risk_level:z.enum(["Low","Medium","High"]),evidence_required:z.string().default(""),testing_criteria:z.string().default("")});
   const p=schema.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Please complete the required control fields",details:p.error.flatten()});
   try{
     const d=p.data;
@@ -611,15 +537,15 @@ app.post("/api/controls",auth,permit("controls.write"),async(req:AuthedRequest,r
       const assignee=await pool.query("SELECT id FROM users WHERE id=$1 AND organization_id=$2 AND status='active' AND role IN ('control_manager','control_officer')",[d.assigned_user_id,req.user!.orgId]);
       if(!assignee.rowCount)return res.status(400).json({error:"Assigned officer must be an active Control Manager or Control Officer in this workspace"});
     }
-    const q=await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,assigned_user_id,frequency,risk_level,evidence_required,next_due)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,current_date + interval '30 days') RETURNING *`,
-      [req.user!.orgId,d.control_code,d.title,d.description,d.category,d.framework_ref,d.owner,d.assigned_user_id??null,d.frequency,d.risk_level,d.evidence_required]);
+    const q=await pool.query(`INSERT INTO controls(organization_id,control_code,title,description,category,framework_ref,owner,assigned_user_id,frequency,risk_level,evidence_required,testing_criteria,next_due)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,current_date + interval '30 days') RETURNING *`,
+      [req.user!.orgId,d.control_code,d.title,d.description,d.category,d.framework_ref,d.owner,d.assigned_user_id??null,d.frequency,d.risk_level,d.evidence_required,d.testing_criteria]);
     await audit(req.user!,"CREATE","control",q.rows[0].id,{code:d.control_code}); res.status(201).json(q.rows[0]);
   }catch(e:any){res.status(409).json({error:e.code==="23505"?"Control code already exists":"Unable to create control"});}
-});
+}));
 
-app.put("/api/controls/:id",auth,permit("controls.write"),async(req:AuthedRequest,res)=>{
-  const id=Number(req.params.id); const allowed=["title","description","category","framework_ref","owner","assigned_user_id","frequency","status","risk_level","evidence_required","next_due"];
+app.put("/api/controls/:id",auth,permit("controls.write"),asyncRoute(async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id); const allowed=["title","description","category","framework_ref","owner","assigned_user_id","frequency","status","risk_level","evidence_required","testing_criteria","next_due"];
   const fields=allowed.filter(k=>req.body[k]!==undefined); if(!fields.length) return res.status(400).json({error:"No supported fields supplied"});
   if(req.body.assigned_user_id){
     const assignee=await pool.query("SELECT id FROM users WHERE id=$1 AND organization_id=$2 AND status='active' AND role IN ('control_manager','control_officer')",[Number(req.body.assigned_user_id),req.user!.orgId]);
@@ -628,25 +554,17 @@ app.put("/api/controls/:id",auth,permit("controls.write"),async(req:AuthedReques
   const vals=fields.map(k=>req.body[k]); const set=fields.map((k,i)=>`${k}=$${i+3}`).join(",");
   const q=await pool.query(`UPDATE controls SET ${set},updated_at=now() WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,...vals]);
   if(!q.rowCount) return res.status(404).json({error:"Control not found"}); await audit(req.user!,"UPDATE","control",id,{fields}); res.json(q.rows[0]);
-});
+}));
 
-app.get("/api/assessments",auth,permit("assessments.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/assessments",auth,permit("assessments.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT a.*,c.control_code,c.title control_title,u.name tester_name FROM assessments a
-    JOIN controls c ON c.id=a.control_id LEFT JOIN users u ON u.id=a.tester_id WHERE a.organization_id=$1 AND ($2::boolean=false OR c.assigned_user_id=$3) ORDER BY a.tested_at DESC`,[req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
+    JOIN controls c ON c.id=a.control_id LEFT JOIN users u ON u.id=a.tester_id WHERE a.organization_id=$1 AND ($4::text='' OR a.is_sample=($4='sample')) AND ($2::boolean=false OR c.assigned_user_id=$3) ORDER BY a.tested_at DESC`,[req.user!.orgId,req.user!.role==="control_officer",req.user!.id,["actual","sample"].includes(String(req.query.dataset))?String(req.query.dataset):""]);
   res.json(q.rows);
-});
+}));
 
-app.post("/api/assessments",auth,permit("assessments.write"),async(req:AuthedRequest,res)=>{
-  const s=z.object({control_id:z.number().int(),period:z.string().min(2),result:z.enum(["Effective","Partially Effective","Ineffective","Not Tested"]),score:z.number().int().min(0).max(100).optional(),notes:z.string().default("")});
-  const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid assessment data",details:p.error.flatten()});
-  if(!(await hasControlAccess(req.user!,p.data.control_id))) return res.status(404).json({error:"Control not found or not assigned to you"});
-  const q=await pool.query(`INSERT INTO assessments(organization_id,control_id,tester_id,period,result,score,notes) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-    [req.user!.orgId,p.data.control_id,req.user!.id,p.data.period,p.data.result,p.data.score??null,p.data.notes]);
-  await pool.query("UPDATE controls SET last_tested=current_date,next_due=current_date + interval '90 days',updated_at=now() WHERE id=$1",[p.data.control_id]);
-  await audit(req.user!,"TEST","control",p.data.control_id,{assessmentId:q.rows[0].id,result:p.data.result}); res.status(201).json(q.rows[0]);
-});
+app.post('/api/assessments',auth,(_req,res)=>res.status(410).json({error:'Use the Test Control workflow to document the procedure and evidence.'}));
 
-app.post("/api/evidence/upload",auth,permit("evidence.write"),upload.single("file"),async(req:AuthedRequest,res)=>{
+app.post("/api/evidence/upload",auth,permit("evidence.write"),upload.single("file"),asyncRoute(async(req:AuthedRequest,res)=>{
   if(!req.file) return res.status(400).json({error:"Choose a file to upload"});
   const controlId=Number(req.body.control_id);
   if(!Number.isInteger(controlId)) return res.status(400).json({error:"Select a control"});
@@ -662,17 +580,17 @@ app.post("/api/evidence/upload",auth,permit("evidence.write"),upload.single("fil
   ]);
   await audit(req.user!,"UPLOAD_EVIDENCE","control",controlId,{evidenceId:ev.rows[0].id,fileId:f.rows[0].id,sha256:sha});
   res.status(201).json({...ev.rows[0],file:f.rows[0]});
-});
+}));
 
-app.get("/api/evidence/files/:id",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/evidence/files/:id",auth,permit("evidence.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
   const q=await pool.query(`SELECT f.* FROM evidence_files f JOIN evidence e ON e.file_id=f.id JOIN controls c ON c.id=e.control_id WHERE f.id=$1 AND f.organization_id=$2 AND ($3::boolean=false OR c.assigned_user_id=$4)`,[id,req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
   if(!q.rowCount) return res.status(404).json({error:"Evidence file not found"});
   const f=q.rows[0];res.setHeader("Content-Type",f.mime_type);res.setHeader("Content-Length",String(f.size_bytes));
-  res.setHeader("Content-Disposition",'attachment; filename="'+String(f.original_name).replace(/"/g,"")+'"');res.setHeader("X-Evidence-SHA256",f.sha256);await audit(req.user!,"DOWNLOAD_EVIDENCE","evidence_file",id,{sha256:f.sha256});res.send(f.content);
-});
+  res.setHeader("Content-Disposition",'attachment; filename="'+String(f.original_name).replace(/["\r\n]/g,"")+'"');res.setHeader("X-Evidence-SHA256",f.sha256);await audit(req.user!,"DOWNLOAD_EVIDENCE","evidence_file",id,{sha256:f.sha256});res.send(f.content);
+}));
 
-app.post("/api/evidence/:id/verify",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
+app.post("/api/evidence/:id/verify",auth,permit("evidence.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
   const q=await pool.query(`SELECT e.id,e.sha256,e.file_id,f.content,f.sha256 stored_file_sha FROM evidence e
     LEFT JOIN evidence_files f ON f.id=e.file_id JOIN controls c ON c.id=e.control_id
@@ -683,10 +601,11 @@ app.post("/api/evidence/:id/verify",auth,permit("evidence.read"),async(req:Authe
   const valid=calculated===q.rows[0].sha256 && calculated===q.rows[0].stored_file_sha;
   await audit(req.user!,"VERIFY_EVIDENCE","evidence",id,{valid,sha256:calculated});
   res.json({valid,sha256:calculated});
-});
+}));
 
-app.post("/api/evidence/:id/review",auth,permit("evidence.review"),async(req:AuthedRequest,res)=>{
+app.post("/api/evidence/:id/review",auth,permit("evidence.review"),asyncRoute(async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
+  const independent=await pool.query('SELECT uploaded_by,is_sample FROM evidence WHERE id=$1 AND organization_id=$2',[id,req.user!.orgId]);if(!independent.rowCount)return res.status(404).json({error:'Record not found'});if(independent.rows[0].is_sample)return res.status(403).json({error:'Sample evidence is read-only'});if(independent.rows[0].uploaded_by===req.user!.id)return res.status(403).json({error:'An independent reviewer must make this decision'});
   const s=z.object({review_status:z.enum(["Approved","Rejected","Needs Update"]),review_notes:z.string().default("")});
   const p=s.safeParse(req.body);if(!p.success) return res.status(400).json({error:"Invalid review"});
   const q=await pool.query(`UPDATE evidence e SET review_status=$3,review_notes=$4,reviewed_by=$5,reviewed_at=now()
@@ -694,71 +613,71 @@ app.post("/api/evidence/:id/review",auth,permit("evidence.review"),async(req:Aut
     [id,req.user!.orgId,p.data.review_status,p.data.review_notes,req.user!.id,req.user!.role==="control_officer",req.user!.id]);
   if(!q.rowCount) return res.status(404).json({error:"Evidence not found"});
   await audit(req.user!,"REVIEW_EVIDENCE","evidence",id,{status:p.data.review_status});res.json(q.rows[0]);
-});
+}));
 
-app.post("/api/assessments/:id/review",auth,permit("assessments.review"),async(req:AuthedRequest,res)=>{
+app.post("/api/assessments/:id/review",auth,permit("assessments.review"),asyncRoute(async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
+  const independent=await pool.query('SELECT tester_id,is_sample FROM assessments WHERE id=$1 AND organization_id=$2',[id,req.user!.orgId]);if(!independent.rowCount)return res.status(404).json({error:'Record not found'});if(independent.rows[0].is_sample)return res.status(403).json({error:'Sample tests are read-only'});if(independent.rows[0].tester_id===req.user!.id)return res.status(403).json({error:'An independent reviewer must make this decision'});
   const s=z.object({review_status:z.enum(["Reviewed","Needs Rework","Rejected"]),review_notes:z.string().default("")});
   const p=s.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid assessment review"});
   const q=await pool.query(`UPDATE assessments SET review_status=$3,review_notes=$4,reviewed_by=$5,reviewed_at=now()
     WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,p.data.review_status,p.data.review_notes,req.user!.id]);
   if(!q.rowCount)return res.status(404).json({error:"Assessment not found"});
   await audit(req.user!,"REVIEW_TEST","assessment",id,{status:p.data.review_status});res.json(q.rows[0]);
-});
+}));
 
-app.get("/api/evidence",auth,permit("evidence.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/evidence",auth,permit("evidence.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT e.*,c.control_code,c.title control_title,u.name uploaded_by_name FROM evidence e
-    JOIN controls c ON c.id=e.control_id LEFT JOIN users u ON u.id=e.uploaded_by WHERE e.organization_id=$1 AND ($2::boolean=false OR c.assigned_user_id=$3) ORDER BY e.created_at DESC`,[req.user!.orgId,req.user!.role==="control_officer",req.user!.id]); res.json(q.rows);
-});
+    JOIN controls c ON c.id=e.control_id LEFT JOIN users u ON u.id=e.uploaded_by WHERE e.organization_id=$1 AND ($4::text='' OR e.is_sample=($4='sample')) AND ($2::boolean=false OR c.assigned_user_id=$3) ORDER BY e.created_at DESC`,[req.user!.orgId,req.user!.role==="control_officer",req.user!.id,["actual","sample"].includes(String(req.query.dataset))?String(req.query.dataset):""]); res.json(q.rows);
+}));
 
-app.post("/api/evidence",auth,permit("evidence.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/evidence",auth,permit("evidence.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const s=z.object({control_id:z.number().int(),assessment_id:z.number().int().nullable().optional(),title:z.string().min(2),evidence_type:z.string().default("Document"),source:z.string().default("Manual Upload"),url:z.string().default(""),period:z.string().default(""),status:z.string().default("Current")});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid evidence data",details:p.error.flatten()});
   if(!(await hasControlAccess(req.user!,p.data.control_id))) return res.status(404).json({error:"Control not found or not assigned to you"});
   const d=p.data; const q=await pool.query(`INSERT INTO evidence(organization_id,control_id,assessment_id,title,evidence_type,source,url,period,status,uploaded_by)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,[req.user!.orgId,d.control_id,d.assessment_id??null,d.title,d.evidence_type,d.source,d.url,d.period,d.status,req.user!.id]);
   await audit(req.user!,"ADD_EVIDENCE","control",d.control_id,{evidenceId:q.rows[0].id,title:d.title}); res.status(201).json(q.rows[0]);
-});
+}));
 
-app.get("/api/findings",auth,permit("findings.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/findings",auth,permit("findings.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT f.*,c.control_code,c.title control_title FROM findings f LEFT JOIN controls c ON c.id=f.control_id
-    WHERE f.organization_id=$1 AND ($2::boolean=false OR c.assigned_user_id=$3) ORDER BY CASE f.severity WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END,f.created_at DESC`,[req.user!.orgId,req.user!.role==="control_officer",req.user!.id]); res.json(q.rows);
-});
+    WHERE f.organization_id=$1 AND ($4::text='' OR f.is_sample=($4='sample')) AND ($2::boolean=false OR c.assigned_user_id=$3) ORDER BY CASE f.severity WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END,f.created_at DESC`,[req.user!.orgId,req.user!.role==="control_officer",req.user!.id,["actual","sample"].includes(String(req.query.dataset))?String(req.query.dataset):""]); res.json(q.rows);
+}));
 
-app.post("/api/findings",auth,permit("findings.write"),async(req:AuthedRequest,res)=>{
-  const s=z.object({control_id:z.number().int().nullable().optional(),title:z.string().trim().min(3),description:z.string().default(""),severity:z.enum(["Low","Medium","High"]),status:z.enum(["Open","In Progress"]).default("Open"),owner:z.string().default(""),due_date:z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/),z.literal(""),z.null()]).optional()});
+app.post("/api/findings",auth,permit("findings.write"),asyncRoute(async(req:AuthedRequest,res)=>{
+  const s=z.object({control_id:z.number().int().nullable().optional(),title:z.string().trim().min(3),description:z.string().default(""),severity:z.enum(["Low","Medium","High"]),status:z.enum(["Open","In Progress"]).default("Open"),owner:z.string().default(""),owner_user_id:z.number().int().nullable().optional(),root_cause:z.string().max(6000).default(""),recommendation:z.string().max(6000).default(""),completion_notes:z.string().max(6000).default(""),due_date:z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/),z.literal(""),z.null()]).optional()});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Please check the finding fields",details:p.error.flatten()});
   const d=p.data;
   if(req.user!.role==="control_officer"&&!d.control_id)return res.status(400).json({error:"Control Officers must link findings to an assigned control"});
   if(d.control_id){
     if(!(await hasControlAccess(req.user!,d.control_id)))return res.status(400).json({error:"The selected control is unavailable or not assigned to you"});
   }
+  let owner=d.owner;if(d.owner_user_id){const u=await pool.query("SELECT name FROM users WHERE id=$1 AND organization_id=$2 AND status='active'",[d.owner_user_id,req.user!.orgId]);if(!u.rowCount)return res.status(400).json({error:"Choose an active owner in this organisation"});owner=u.rows[0].name;}
   try{
-    const q=await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date,updated_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING *`,[req.user!.orgId,d.control_id??null,d.title,d.description,d.severity,d.status,d.owner,d.due_date||null]);
+    const q=await pool.query(`INSERT INTO findings(organization_id,control_id,title,description,severity,status,owner,due_date,owner_user_id,root_cause,recommendation,completion_notes,updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now()) RETURNING *`,[req.user!.orgId,d.control_id??null,d.title,d.description,d.severity,d.status,owner,d.due_date||null,d.owner_user_id||null,d.root_cause,d.recommendation,d.completion_notes]);
     await audit(req.user!,"CREATE","finding",q.rows[0].id,{severity:d.severity,controlId:d.control_id??null,status:d.status});
     res.status(201).json(q.rows[0]);
   }catch(err:any){console.error("Create finding failed",err);res.status(500).json({error:"Unable to save finding"});}
-});
+}));
 
-app.put("/api/findings/:id",auth,permit("findings.write"),async(req:AuthedRequest,res)=>{
-  const id=Number(req.params.id); const s=z.object({status:z.string(),owner:z.string().optional(),due_date:z.string().nullable().optional(),description:z.string().optional()}); const p=s.safeParse(req.body);
-  if(!p.success) return res.status(400).json({error:"Invalid update"});
+app.put("/api/findings/:id",auth,permit("findings.write"),asyncRoute(async(req:AuthedRequest,res)=>{
+  const id=Number(req.params.id);const schema=z.object({title:z.string().trim().min(3).max(240),status:z.enum(["Open","In Progress","Pending Review","Closed","Resolved"]),severity:z.enum(["Low","Medium","High"]),owner_user_id:z.number().int().nullable().optional(),due_date:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).or(z.literal("")).nullable().optional(),description:z.string().max(6000),root_cause:z.string().max(6000).default(""),recommendation:z.string().max(6000).default(""),completion_notes:z.string().max(6000).default("")});const p=schema.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Check the finding fields"});
   const existing=await pool.query(`SELECT f.* FROM findings f LEFT JOIN controls c ON c.id=f.control_id WHERE f.id=$1 AND f.organization_id=$2 AND ($3::boolean=false OR c.assigned_user_id=$4)`,[id,req.user!.orgId,req.user!.role==="control_officer",req.user!.id]);
-  if(!existing.rowCount) return res.status(404).json({error:"Finding not found"});
-  const d=p.data;
+  if(!existing.rowCount)return res.status(404).json({error:"Finding not found"});if(existing.rows[0].is_sample)return res.status(403).json({error:"Sample findings are read-only"});const d=p.data;let owner=existing.rows[0].owner;
+  if(d.owner_user_id){const u=await pool.query("SELECT name FROM users WHERE id=$1 AND organization_id=$2 AND status='active'",[d.owner_user_id,req.user!.orgId]);if(!u.rowCount)return res.status(400).json({error:"Choose an active owner in this organisation"});owner=u.rows[0].name;}
   if(["Closed","Resolved"].includes(d.status)){
-    const pass=await pool.query(`SELECT id FROM assessments WHERE organization_id=$1 AND control_id=$2 AND result='Effective'
-      AND tested_at >= $3 ORDER BY tested_at DESC LIMIT 1`,[req.user!.orgId,existing.rows[0].control_id,existing.rows[0].created_at]);
-    if(!pass.rowCount) return res.status(409).json({error:"A passing retest is required before this finding can be closed"});
+    if(!['admin','control_manager','auditor'].includes(req.user!.role)||existing.rows[0].owner_user_id===req.user!.id)return res.status(403).json({error:"An independent manager or auditor must verify closure"});
+    if(!d.completion_notes)return res.status(400).json({error:"Record the closure verification"});
+    const pass=await pool.query(`SELECT id FROM assessments WHERE organization_id=$1 AND control_id=$2 AND NOT is_sample AND result='Effective' AND tested_at >= $3 AND review_status='Reviewed' AND reviewed_by IS NOT NULL AND reviewed_by<>tester_id AND jsonb_array_length(evidence_ids)>0 ORDER BY tested_at DESC LIMIT 1`,[req.user!.orgId,existing.rows[0].control_id,existing.rows[0].created_at]);
+    if(!pass.rowCount)return res.status(409).json({error:"An independently reviewed passing retest is required before closure"});
   }
-  const q=await pool.query(`UPDATE findings SET status=$3,owner=COALESCE($4,owner),due_date=COALESCE($5::date,due_date),description=COALESCE($6,description),updated_at=now(),
-    resolved_at=CASE WHEN $3 IN ('Closed','Resolved') THEN now() ELSE NULL END WHERE id=$1 AND organization_id=$2 RETURNING *`,
-    [id,req.user!.orgId,d.status,d.owner??null,d.due_date??null,d.description??null]);
-  await audit(req.user!,"UPDATE","finding",id,{status:d.status}); res.json(q.rows[0]);
-});
+  const q=await pool.query(`UPDATE findings SET title=$3,status=$4,severity=$5,owner=$6,owner_user_id=$7,due_date=$8,description=$9,root_cause=$10,recommendation=$11,completion_notes=$12,updated_at=now(),resolved_at=CASE WHEN $4 IN ('Closed','Resolved') THEN now() ELSE NULL END WHERE id=$1 AND organization_id=$2 RETURNING *`,[id,req.user!.orgId,d.title,d.status,d.severity,owner,d.owner_user_id||null,d.due_date||null,d.description,d.root_cause,d.recommendation,d.completion_notes]);
+  await audit(req.user!,"UPDATE","finding",id,{status:d.status,ownerId:d.owner_user_id});res.json(q.rows[0]);
+}));
 
-app.post("/api/integrations/github/connect",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/integrations/github/connect",auth,permit("integrations.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const s=z.object({token:z.string().min(20),repositories:z.array(z.string()).default([])});
   const p=s.safeParse(req.body);if(!p.success) return res.status(400).json({error:"A valid GitHub token is required"});
   try{
@@ -775,9 +694,9 @@ app.post("/api/integrations/github/connect",auth,permit("integrations.write"),as
     await audit(req.user!,"CONNECT","integration",integration.rows[0].id,{provider:"github",login:me.body.login});
     res.json({status:"Connected",account:{login:me.body.login,name:me.body.name,avatar_url:me.body.avatar_url},scopes:me.headers.get("x-oauth-scopes")||""});
   }catch(err:any){res.status(err.status===401?401:400).json({error:err.message||"Unable to validate GitHub connection"});}
-});
+}));
 
-app.get("/api/integrations/github/repositories",auth,permit("integrations.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/integrations/github/repositories",auth,permit("integrations.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const q=await pool.query("SELECT * FROM integration_connections WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId]);
   if(!q.rowCount) return res.status(409).json({error:"GitHub is not connected"});
   try{
@@ -785,15 +704,15 @@ app.get("/api/integrations/github/repositories",auth,permit("integrations.read")
     const repos=(data.body||[]).map((r:any)=>({full_name:r.full_name,name:r.name,owner:r.owner?.login,private:r.private,default_branch:r.default_branch,archived:r.archived,updated_at:r.updated_at,permissions:r.permissions}));
     res.json({repositories:repos,selected:q.rows[0].config?.repositories||[]});
   }catch(err:any){await pool.query("UPDATE integration_connections SET last_error=$2 WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId,err.message]);res.status(400).json({error:err.message});}
-});
+}));
 
-app.put("/api/integrations/github/config",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+app.put("/api/integrations/github/config",auth,permit("integrations.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const s=z.object({repositories:z.array(z.string()).max(100)});const p=s.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid repository selection"});
   const q=await pool.query("UPDATE integration_connections SET config=jsonb_set(COALESCE(config,'{}'::jsonb),'{repositories}',$2::jsonb,true) WHERE organization_id=$1 AND provider_key='github' RETURNING id",[req.user!.orgId,JSON.stringify(p.data.repositories)]);
   if(!q.rowCount)return res.status(409).json({error:"GitHub is not connected"});await audit(req.user!,"CONFIGURE","integration",null,{provider:"github",repositories:p.data.repositories});res.json({repositories:p.data.repositories});
-});
+}));
 
-app.post("/api/integrations/github/sync",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/integrations/github/sync",auth,permit("integrations.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const conn=await pool.query("SELECT c.*,i.id integration_id FROM integration_connections c JOIN integrations i ON i.id=c.integration_id WHERE c.organization_id=$1 AND c.provider_key='github'",[req.user!.orgId]);
   if(!conn.rowCount) return res.status(409).json({error:"GitHub is not connected"});
   const {token}=decryptSecret(conn.rows[0]);let repos:string[]=conn.rows[0].config?.repositories||[];
@@ -853,16 +772,16 @@ app.post("/api/integrations/github/sync",auth,permit("integrations.write"),async
     await audit(req.user!,"SYNC","integration",conn.rows[0].integration_id,{provider:"github",repositories:repos.length,evidenceCreated:created,findingsCreated:findings,errors});
     res.json({repositoriesScanned:repos.length,evidenceCreated:created,findingsCreated:findings,errors});
   }catch(err:any){res.status(400).json({error:err.message||"GitHub sync failed"});}
-});
+}));
 
-app.delete("/api/integrations/github/connection",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+app.delete("/api/integrations/github/connection",auth,permit("integrations.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const integration=await pool.query("SELECT id FROM integrations WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId]);
   await pool.query("DELETE FROM integration_connections WHERE organization_id=$1 AND provider_key='github'",[req.user!.orgId]);
   if(integration.rowCount) await pool.query("UPDATE integrations SET status='Available',tenant_ref='',last_sync_at=NULL WHERE id=$1",[integration.rows[0].id]);
   await audit(req.user!,"DISCONNECT","integration",integration.rows[0]?.id||null,{provider:"github"});res.json({status:"Available"});
-});
+}));
 
-app.post("/api/integrations/:provider/connect",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/integrations/:provider/connect",auth,permit("integrations.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const provider=String(req.params.provider||"");
   if(provider==="github") return res.status(400).json({error:"Use the dedicated GitHub connection flow"});
   if(!liveConnectorKeys.includes(provider as any)) return res.status(400).json({error:"This connector is catalogued but its live adapter is not enabled yet"});
@@ -882,9 +801,9 @@ app.post("/api/integrations/:provider/connect",auth,permit("integrations.write")
     await audit(req.user!,"CONNECT","integration",integration.rows[0].id,{provider,identity:validation.identity});
     res.json({status:"Connected",identity:validation.identity,metadata:validation.metadata});
   }catch(err:any){res.status(err?.status===401||err?.status===403?401:400).json({error:err?.message||"Connector validation failed"});}
-});
+}));
 
-app.post("/api/integrations/:provider/sync",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/integrations/:provider/sync",auth,permit("integrations.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const provider=String(req.params.provider||"");
   if(provider==="github") return res.status(400).json({error:"Use the dedicated GitHub sync flow"});
   if(!liveConnectorKeys.includes(provider as any)) return res.status(400).json({error:"This connector does not have a live adapter yet"});
@@ -923,25 +842,25 @@ app.post("/api/integrations/:provider/sync",auth,permit("integrations.write"),as
     await pool.query("UPDATE integration_connections SET last_error=$2 WHERE id=$1",[conn.rows[0].id,err?.message||"Sync failed"]).catch(()=>{});
     res.status(400).json({error:err?.message||"Connector sync failed"});
   }
-});
+}));
 
-app.delete("/api/integrations/:provider/connection",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+app.delete("/api/integrations/:provider/connection",auth,permit("integrations.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const provider=String(req.params.provider||"");if(provider==="github")return res.status(400).json({error:"Use the dedicated GitHub disconnect flow"});
   const integration=await pool.query("SELECT id FROM integrations WHERE organization_id=$1 AND provider_key=$2",[req.user!.orgId,provider]);
   await pool.query("DELETE FROM integration_connections WHERE organization_id=$1 AND provider_key=$2",[req.user!.orgId,provider]);
   if(integration.rowCount)await pool.query("UPDATE integrations SET status='Available',tenant_ref='',last_sync_at=NULL WHERE id=$1",[integration.rows[0].id]);
   await audit(req.user!,"DISCONNECT","integration",integration.rows[0]?.id||null,{provider});res.json({status:"Available"});
-});
+}));
 
-app.get("/api/integrations",auth,permit("integrations.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/integrations",auth,permit("integrations.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT i.*,
     (SELECT count(*)::int FROM automation_rules a WHERE a.integration_id=i.id) automation_count,
     EXISTS(SELECT 1 FROM integration_connections c WHERE c.integration_id=i.id AND c.organization_id=i.organization_id) has_connection
     FROM integrations i WHERE i.organization_id=$1 ORDER BY category,name`,[req.user!.orgId]);
   res.json(q.rows.map((r:any)=>({...r,connector_live:r.provider_key==="github"||liveConnectorKeys.includes(r.provider_key as any),connector_fields:r.provider_key==="github"?null:connectorFields(r.provider_key)})));
-});
+}));
 
-app.put("/api/integrations/:id",auth,permit("integrations.write"),async(req:AuthedRequest,res)=>{
+app.put("/api/integrations/:id",auth,permit("integrations.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
   const s=z.object({status:z.enum(["Available","Configured","Paused"]),base_url:z.string().optional(),tenant_ref:z.string().optional()});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid integration settings"});
@@ -950,16 +869,16 @@ app.put("/api/integrations/:id",auth,permit("integrations.write"),async(req:Auth
     [id,req.user!.orgId,p.data.status,p.data.base_url??null,p.data.tenant_ref??null]);
   if(!q.rowCount) return res.status(404).json({error:"Integration not found"});
   await audit(req.user!,"UPDATE","integration",id,{status:p.data.status});res.json(q.rows[0]);
-});
+}));
 
-app.get("/api/automation",auth,permit("automation.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/automation",auth,permit("automation.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT a.*,c.control_code,c.title control_title,i.name integration_name,i.status integration_status
     FROM automation_rules a JOIN controls c ON c.id=a.control_id JOIN integrations i ON i.id=a.integration_id
     WHERE a.organization_id=$1 ORDER BY a.status,a.name`,[req.user!.orgId]);
   res.json(q.rows);
-});
+}));
 
-app.post("/api/automation",auth,permit("automation.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/automation",auth,permit("automation.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const s=z.object({control_id:z.number().int(),integration_id:z.number().int(),name:z.string().min(3),schedule:z.string().min(2),evidence_type:z.string().default("System Report")});
   const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid automation rule",details:p.error.flatten()});
   const d=p.data;
@@ -969,9 +888,9 @@ app.post("/api/automation",auth,permit("automation.write"),async(req:AuthedReque
   const q=await pool.query("INSERT INTO automation_rules(organization_id,control_id,integration_id,name,schedule,evidence_type,status) VALUES($1,$2,$3,$4,$5,$6,'Ready') RETURNING *",
     [req.user!.orgId,d.control_id,d.integration_id,d.name,d.schedule,d.evidence_type]);
   await audit(req.user!,"CREATE","automation_rule",q.rows[0].id,{controlId:d.control_id,integrationId:d.integration_id});res.status(201).json(q.rows[0]);
-});
+}));
 
-app.post("/api/automation/:id/run",auth,permit("automation.write"),async(req:AuthedRequest,res)=>{
+app.post("/api/automation/:id/run",auth,permit("automation.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);
   const q=await pool.query(`SELECT a.*,i.status integration_status,i.provider_key,c.control_code,c.owner control_owner
     FROM automation_rules a JOIN integrations i ON i.id=a.integration_id JOIN controls c ON c.id=a.control_id
@@ -1014,9 +933,9 @@ app.post("/api/automation/:id/run",auth,permit("automation.write"),async(req:Aut
     await pool.query("UPDATE automation_rules SET last_run_at=now(),last_result=$2 WHERE id=$1",[id,"Failed: "+(err?.message||"Unknown error")]).catch(()=>{});
     res.status(400).json({error:err?.message||"Automation run failed"});
   }
-});
+}));
 
-app.get("/api/reports/control-health",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/reports/control-health",auth,permit("reports.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const q=await pool.query(`SELECT c.control_code,c.title,c.category,c.risk_level,c.owner,c.next_due,
     COALESCE((SELECT a.score FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1),0) score,
     COALESCE((SELECT a.result FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1),'Not Tested') latest_result,
@@ -1024,10 +943,10 @@ app.get("/api/reports/control-health",auth,permit("reports.read"),async(req:Auth
     (SELECT count(*)::int FROM findings f WHERE f.control_id=c.id AND f.status NOT IN ('Closed','Resolved')) open_findings
     FROM controls c WHERE c.organization_id=$1 ORDER BY c.category,c.control_code`,[req.user!.orgId]);
   res.json(q.rows);
-});
+}));
 
 
-app.get("/api/reports/framework-coverage",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/reports/framework-coverage",auth,permit("reports.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const o=req.user!.orgId;
   const frameworks=[
     ["ISO 27001","ISO 27001"],["NIST","NIST"],["CIS","CIS"],["COBIT","COBIT"],
@@ -1040,9 +959,9 @@ app.get("/api/reports/framework-coverage",auth,permit("reports.read"),async(req:
     rows.push({framework:name,controls:Number(q.rows[0].total)});
   }
   res.json(rows.filter(x=>x.controls>0));
-});
+}));
 
-app.get("/api/reports/evidence-freshness",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/reports/evidence-freshness",auth,permit("reports.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const o=req.user!.orgId;
   const q=await pool.query(`SELECT
     count(*)::int total,
@@ -1056,9 +975,9 @@ app.get("/api/reports/evidence-freshness",auth,permit("reports.read"),async(req:
     WHERE e.organization_id=$1 AND e.expires_at IS NOT NULL AND e.expires_at <= now()+interval '14 days'
     ORDER BY e.expires_at ASC LIMIT 25`,[o]);
   res.json({...q.rows[0],items:due.rows});
-});
+}));
 
-app.get("/api/reports/assurance-summary",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/reports/assurance-summary",auth,permit("reports.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const o=req.user!.orgId;
   const q=await pool.query(`SELECT
     (SELECT count(*)::int FROM controls WHERE organization_id=$1) controls,
@@ -1072,9 +991,9 @@ app.get("/api/reports/assurance-summary",auth,permit("reports.read"),async(req:A
     testing_coverage:Math.round(Number(r.tested_controls)/total*100),
     automation_coverage:Math.round(Number(r.automated_controls)/total*100)
   });
-});
+}));
 
-app.get("/api/reports/audit-pack.csv",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/reports/audit-pack.csv",auth,permit("reports.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const o=req.user!.orgId;
   const q=await pool.query(`SELECT c.control_code,c.title,c.category,c.framework_ref,c.owner,c.frequency,c.risk_level,c.status,c.last_tested,c.next_due,
     COALESCE((SELECT a.result FROM assessments a WHERE a.control_id=c.id ORDER BY tested_at DESC LIMIT 1),'Not Tested') latest_result,
@@ -1093,9 +1012,9 @@ app.get("/api/reports/audit-pack.csv",auth,permit("reports.read"),async(req:Auth
   res.setHeader("Content-Type","text/csv; charset=utf-8");
   res.setHeader("Content-Disposition",'attachment; filename="revolt-x-it-controls-audit-pack.csv"');
   res.send(csv);
-});
+}));
 
-app.get("/api/reports/audit-pack.zip",auth,permit("reports.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/reports/audit-pack.zip",auth,permit("reports.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const o=req.user!.orgId;
   const [org,controls,tests,evidence,findings,auditRows,integrations,files]=await Promise.all([
     pool.query("SELECT name,slug,industry,country,timezone,contact_email,created_at FROM organizations WHERE id=$1",[o]),
@@ -1152,35 +1071,39 @@ app.get("/api/reports/audit-pack.zip",auth,permit("reports.read"),async(req:Auth
   archive.append("This pack was generated by Revolt-X Enterprise Control Management. Verify source-file integrity using the SHA-256 values in the evidence register and manifest. Files beyond the 100 MB pack cap remain available in the Evidence Vault.",{name:"README.txt"});
   await audit(req.user!,"EXPORT","audit_pack",null,{format:"zip",controls:controls.rowCount,evidence:evidence.rowCount,filesIncludedBytes:includedBytes});
   await archive.finalize();
-});
+}));
 
-app.get("/api/settings/organization",auth,permit("settings.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/settings/organization",auth,permit("settings.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const q=await pool.query("SELECT id,name,slug,industry,country,timezone,contact_email,created_at FROM organizations WHERE id=$1",[req.user!.orgId]);
   res.json(q.rows[0]);
-});
-app.put("/api/settings/organization",auth,permit("settings.write"),async(req:AuthedRequest,res)=>{
+}));
+app.put("/api/settings/organization",auth,permit("settings.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const s=z.object({name:z.string().min(2),industry:z.string().default(""),country:z.string().default(""),timezone:z.string().default("UTC"),contact_email:z.union([z.string().email(),z.literal("")]).default("")});
   const p=s.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Invalid organisation settings",details:p.error.flatten()});
   const d=p.data,q=await pool.query("UPDATE organizations SET name=$2,industry=$3,country=$4,timezone=$5,contact_email=$6 WHERE id=$1 RETURNING id,name,slug,industry,country,timezone,contact_email",[req.user!.orgId,d.name,d.industry,d.country,d.timezone,d.contact_email]);
   await audit(req.user!,"UPDATE","organization",req.user!.orgId,{fields:["name","industry","country","timezone","contact_email"]});res.json(q.rows[0]);
-});
-app.post("/api/auth/change-password",auth,async(req:AuthedRequest,res)=>{
-  const s=z.object({current_password:z.string().min(6),new_password:z.string().min(10)});
-  const p=s.safeParse(req.body);if(!p.success)return res.status(400).json({error:"Use a new password of at least 10 characters"});
-  const q=await pool.query("SELECT password_hash FROM users WHERE id=$1 AND organization_id=$2",[req.user!.id,req.user!.orgId]);
-  if(!q.rowCount||!(await bcrypt.compare(p.data.current_password,q.rows[0].password_hash)))return res.status(400).json({error:"Current password is incorrect"});
-  const hash=await bcrypt.hash(p.data.new_password,12);await pool.query("UPDATE users SET password_hash=$2 WHERE id=$1",[req.user!.id,hash]);
-  await audit(req.user!,"CHANGE_PASSWORD","user",req.user!.id,{});res.json({success:true});
-});
-app.put("/api/users/:id/status",auth,permit("users.write"),async(req:AuthedRequest,res)=>{
+}));
+app.post('/api/auth/change-password',auth,asyncRoute(async(req:AuthedRequest,res,next)=>{
+ try{const current=String(req.body.current_password||''),password=String(req.body.new_password||'');if(password.length<12||password.length>128)return res.status(400).json({error:'Use a personal password with 12–128 characters.'});
+  const q=await pool.query('SELECT password_hash FROM users WHERE id=$1',[req.user!.id]);if(!q.rowCount||!await bcrypt.compare(current,q.rows[0].password_hash))return res.status(400).json({error:'Current password is incorrect'});if(await bcrypt.compare(password,q.rows[0].password_hash))return res.status(400).json({error:'Choose a different personal password.'});
+  const hash=await bcrypt.hash(password,12),updated=await pool.query('UPDATE users SET password_hash=$2,must_change_password=false,temporary_password_expires=NULL,session_version=session_version+1 WHERE id=$1 RETURNING session_version',[req.user!.id,hash]);
+  const user={...req.user!,mustChange:false,sessionVersion:updated.rows[0].session_version},token=jwt.sign(user,jwtSecret,{expiresIn:'8h'});setSessionCookie(res,token);await audit(user,'CHANGE_PASSWORD','user',user.id,{});res.json({success:true,user,token,permissions:permissions[user.role]||[]});
+ }catch(e){next(e)}
+}));
+app.post('/api/auth/logout',auth,(req:AuthedRequest,res)=>{res.clearCookie('ecm_session',{path:'/'});res.json({ok:true})});
+const resetLimiter=rateLimit({windowMs:15*60*1000,limit:8,standardHeaders:'draft-8',legacyHeaders:false});
+app.post('/api/auth/forgot-password',resetLimiter,asyncRoute(async(req,res,next)=>{try{const email=String(req.body.email||'').trim().toLowerCase();if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return res.status(400).json({error:'Enter a valid email address.'});const q=await pool.query("SELECT id,organization_id,name,email FROM users WHERE lower(email)=$1 AND status='active'",[email]);if(q.rowCount){const u=q.rows[0],recent=await pool.query("SELECT 1 FROM ecm_password_resets WHERE user_id=$1 AND created_at>now()-interval '2 minutes'",[u.id]);if(!recent.rowCount){const token=crypto.randomBytes(32).toString('base64url'),hash=crypto.createHash('sha256').update(token).digest('hex'),expires=new Date(Date.now()+2*60*60*1000);await pool.query('INSERT INTO ecm_password_resets(token_hash,user_id,expires_at) VALUES($1,$2,$3)',[hash,u.id,expires]);await queueNotice(pool,u.organization_id,u.email,'Reset your IT Control password','Hello '+u.name+',\n\nUse this single-use link within two hours to choose a new password:\nhttps://revolt-enterprise-control-management.onrender.com/reset-password?token='+token+'\n\nIf you did not request this, ignore this message.','password_reset','reset:'+hash,expires)}}res.json({message:'If the account exists, a password reset message has been queued.'})}catch(e){next(e)}}));
+app.post('/api/auth/reset-password',resetLimiter,asyncRoute(async(req,res,next)=>{const db=await pool.connect();try{const token=String(req.body.token||''),password=String(req.body.password||'');if(token.length<32||password.length<12||password.length>128)return res.status(400).json({error:'Enter the reset token and a password of 12–128 characters.'});await db.query('BEGIN');const hash=crypto.createHash('sha256').update(token).digest('hex'),q=await db.query('SELECT * FROM ecm_password_resets WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() FOR UPDATE',[hash]);if(!q.rowCount){await db.query('ROLLBACK');return res.status(400).json({error:'The reset link expired or was already used.'})}const passwordHash=await bcrypt.hash(password,12);await db.query('UPDATE users SET password_hash=$2,must_change_password=false,temporary_password_expires=NULL,session_version=session_version+1 WHERE id=$1',[q.rows[0].user_id,passwordHash]);await db.query('UPDATE ecm_password_resets SET used_at=now() WHERE token_hash=$1',[hash]);await db.query('COMMIT');res.clearCookie('ecm_session',{path:'/'});res.json({message:'Password updated. Sign in using your new password.'})}catch(e){await db.query('ROLLBACK');next(e)}finally{db.release()}}));
+
+app.put("/api/users/:id/status",auth,permit("users.write"),asyncRoute(async(req:AuthedRequest,res)=>{
   const id=Number(req.params.id);const s=z.object({status:z.enum(["active","disabled"])});const p=s.safeParse(req.body);
   if(!p.success)return res.status(400).json({error:"Invalid user status"});
   if(id===req.user!.id&&p.data.status==="disabled")return res.status(400).json({error:"You cannot disable your own account"});
   const q=await pool.query("UPDATE users SET status=$3 WHERE id=$1 AND organization_id=$2 RETURNING id,name,email,role,status,created_at",[id,req.user!.orgId,p.data.status]);
   if(!q.rowCount)return res.status(404).json({error:"User not found"});await audit(req.user!,"UPDATE_STATUS","user",id,{status:p.data.status});res.json(q.rows[0]);
-});
+}));
 
-app.get("/api/audit",auth,permit("audit.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/audit",auth,permit("audit.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const search=String(req.query.search||""),action=String(req.query.action||""),entity=String(req.query.entity||"");
   const limit=Math.min(1000,Math.max(1,Number(req.query.limit||500)||500));
   const q=await pool.query(`SELECT a.*,u.name user_name,u.email FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id
@@ -1190,177 +1113,22 @@ app.get("/api/audit",auth,permit("audit.read"),async(req:AuthedRequest,res)=>{
       AND ($4='' OR COALESCE(u.name,'') ILIKE '%'||$4||'%' OR COALESCE(u.email,'') ILIKE '%'||$4||'%' OR a.action ILIKE '%'||$4||'%' OR a.entity_type ILIKE '%'||$4||'%' OR a.details::text ILIKE '%'||$4||'%')
     ORDER BY a.created_at DESC LIMIT $5`,[req.user!.orgId,action,entity,search,limit]);
   res.json(q.rows);
-});
+}));
 
-app.get("/api/users",auth,permit("users.read"),async(req:AuthedRequest,res)=>{
+app.get("/api/users",auth,permit("users.read"),asyncRoute(async(req:AuthedRequest,res)=>{
   const q=await pool.query("SELECT id,name,email,role,status,created_at FROM users WHERE organization_id=$1 ORDER BY name",[req.user!.orgId]); res.json(q.rows);
-});
+}));
 
-app.post("/api/users",auth,permit("users.write"),async(req:AuthedRequest,res)=>{
-  const s=z.object({name:z.string().min(2),email:z.string().email(),password:z.string().min(8),role:z.enum(["admin","control_manager","control_officer","auditor","reviewer","viewer"])});
-  const p=s.safeParse(req.body); if(!p.success) return res.status(400).json({error:"Invalid user data",details:p.error.flatten()});
-  try{ const hash=await bcrypt.hash(p.data.password,12); const q=await pool.query("INSERT INTO users(organization_id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5) RETURNING id,name,email,role,status,created_at",[req.user!.orgId,p.data.name,p.data.email,hash,p.data.role]); await audit(req.user!,"CREATE","user",q.rows[0].id,{role:p.data.role}); res.status(201).json(q.rows[0]); }
-  catch(e:any){res.status(409).json({error:e.code==="23505"?"Email already exists":"Unable to create user"});}
-});
+registerCommercial(app,{pool,auth,permit,audit});
 
 const publicDir=path.join(process.cwd(),"public");
 app.use(express.static(publicDir));
-app.get("*",(_req,res)=>res.sendFile(path.join(publicDir,"index.html")));
+app.get('*',(_req,res)=>res.sendFile(path.join(publicDir,'index.html')));
+app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{const status=error.status|| (error.code==='23505'?409:500);res.status(status).json({error:status===500?'The operation could not complete. Please retry.':error.code==='23505'?'A record with these details already exists.':error.message});console.error('Request failure',status,error.code||error.name)});
 
-async function runStartupSmokeTest(){
-  const base=`http://127.0.0.1:${port}`;
-  const adminEmail=process.env.ADMIN_EMAIL || "";
-  const adminPassword=process.env.ADMIN_PASSWORD || "";
-  const login=await fetch(base+"/api/auth/login",{
-    method:"POST",
-    headers:{"Content-Type":"application/json","X-Revolt-Smoke-Test":"1"},
-    body:JSON.stringify({email:adminEmail,password:adminPassword})
-  });
-  if(!login.ok) throw new Error(`Smoke test login failed: ${login.status}`);
-  const loginData:any=await login.json();
-  if(!loginData.token) throw new Error("Smoke test login returned no token");
-  const headers={Authorization:`Bearer ${loginData.token}`};
-  const endpoints=[
-    ["/api/dashboard","dashboard"],
-    ["/api/controls","controls"],
-    ["/api/assessments","assessments"],
-    ["/api/evidence","evidence"],
-    ["/api/findings","findings"],
-    ["/api/integrations","integrations"],
-    ["/api/automation","automation"],
-    ["/api/reports/control-health","controlHealth"],
-    ["/api/reports/framework-coverage","frameworkCoverage"],
-    ["/api/reports/evidence-freshness","evidenceFreshness"],
-    ["/api/reports/assurance-summary","assuranceSummary"],
-    ["/api/audit","audit"],
-    ["/api/users","users"]
-  ] as const;
-  const results:any={};
-  for(const [url,key] of endpoints){
-    const r=await fetch(base+url,{headers});
-    if(!r.ok) throw new Error(`Smoke test ${key} failed: ${r.status}`);
-    const data:any=await r.json();
-    results[key]=Array.isArray(data)?data.length:(data?.controls?.total ?? data?.total ?? "ok");
-  }
-  if(Number(results.controls)<70) throw new Error(`Smoke test control count too low: ${results.controls}`);
-  if(Number(results.integrations)<30) throw new Error(`Smoke test integration count too low: ${results.integrations}`);
-
-  const connectorCheck=await fetch(base+"/api/integrations",{headers});
-  if(!connectorCheck.ok) throw new Error(`Smoke test connector catalogue failed: ${connectorCheck.status}`);
-  const connectorRows:any[]=await connectorCheck.json();
-  const liveAdapters=connectorRows.filter((x:any)=>x.connector_live).length;
-  if(liveAdapters<9) throw new Error(`Smoke test live connector count too low: ${liveAdapters}`);
-  results.liveConnectorAdapters=liveAdapters;
-
-  const settings=await fetch(base+"/api/settings/organization",{headers});
-  if(!settings.ok) throw new Error(`Smoke test organization settings failed: ${settings.status}`);
-  results.organizationSettings="ok";
-
-  const controlRow=await pool.query("SELECT id,last_tested,next_due FROM controls WHERE control_code='SDLC-002' ORDER BY id LIMIT 1");
-  if(!controlRow.rowCount) throw new Error("Smoke test control SDLC-002 missing");
-  const controlId=Number(controlRow.rows[0].id);
-  const detail=await fetch(base+"/api/controls/"+controlId,{headers});
-  if(!detail.ok) throw new Error(`Smoke test control detail failed: ${detail.status}`);
-  results.controlDetail="ok";
-
-  let smokeEvidenceId:number|null=null,smokeFileId:number|null=null,smokeAssessmentId:number|null=null,smokeFindingId:number|null=null;
-  try{
-    const fd=new FormData();
-    fd.set("control_id",String(controlId));
-    fd.set("title","__startup_smoke_evidence__");
-    fd.set("period","startup-smoke");
-    fd.set("evidence_type","Document");
-    fd.set("file",new Blob(["Revolt-X evidence integrity smoke test"],{type:"text/plain"}),"startup-smoke.txt");
-    const up=await fetch(base+"/api/evidence/upload",{method:"POST",headers:{Authorization:headers.Authorization},body:fd});
-    if(!up.ok) throw new Error(`Smoke test evidence upload failed: ${up.status} ${await up.text()}`);
-    const upData:any=await up.json();smokeEvidenceId=Number(upData.id);smokeFileId=Number(upData.file?.id);
-    const verify=await fetch(base+"/api/evidence/"+smokeEvidenceId+"/verify",{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:"{}"});
-    if(!verify.ok) throw new Error(`Smoke test evidence verify failed: ${verify.status}`);
-    const verifyData:any=await verify.json();if(!verifyData.valid) throw new Error("Smoke test evidence hash verification failed");
-    results.evidenceIntegrity="ok";
-
-    const test=await fetch(base+"/api/controls/"+controlId+"/test",{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({
-      period:"startup-smoke",test_objective:"Validate the production Test Control workflow.",
-      test_procedure:"Create a temporary operating-effectiveness test through the production API and remove it after validation.",
-      result:"Effective",score:100,sample_size:1,exception_count:0,evidence_ids:[smokeEvidenceId],
-      design_effective:true,operating_effective:true,notes:"Temporary startup smoke test.",raise_finding:false
-    })});
-    if(!test.ok) throw new Error(`Smoke test Test Control failed: ${test.status} ${await test.text()}`);
-    const testData:any=await test.json();smokeAssessmentId=Number(testData.assessment?.id);
-    const review=await fetch(base+"/api/assessments/"+smokeAssessmentId+"/review",{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({review_status:"Reviewed",review_notes:"Automated startup validation."})});
-    if(!review.ok) throw new Error(`Smoke test test-review failed: ${review.status}`);
-    results.testControl="ok";
-    results.testReview="ok";
-
-    const progress=await fetch(base+"/api/dashboard/progress?period=quarter",{headers});
-    if(!progress.ok) throw new Error(`Smoke test progress dashboard failed: ${progress.status} ${await progress.text()}`);
-    const progressData:any=await progress.json();
-    if(!Array.isArray(progressData.items)||!progressData.summary) throw new Error("Smoke test progress dashboard returned invalid data");
-    results.progressDashboard="ok";
-
-    const finding=await fetch(base+"/api/findings",{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({
-      control_id:controlId,title:"__startup_smoke_finding__",description:"Temporary finding save/update validation.",severity:"Low",status:"Open",owner:"Startup Smoke",due_date:"2099-01-01"
-    })});
-    if(!finding.ok) throw new Error(`Smoke test finding create failed: ${finding.status} ${await finding.text()}`);
-    const findingData:any=await finding.json();smokeFindingId=Number(findingData.id);
-    const findingList=await fetch(base+"/api/findings",{headers});
-    if(!findingList.ok) throw new Error(`Smoke test finding reload failed: ${findingList.status}`);
-    const findingRows:any[]=await findingList.json();
-    if(!findingRows.some((x:any)=>Number(x.id)===smokeFindingId)) throw new Error("Smoke test finding did not persist");
-    const findingUpdate=await fetch(base+"/api/findings/"+smokeFindingId,{method:"PUT",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({status:"In Progress",owner:"Startup Smoke Updated",due_date:"2099-02-01",description:"Updated smoke remediation."})});
-    if(!findingUpdate.ok) throw new Error(`Smoke test finding update failed: ${findingUpdate.status} ${await findingUpdate.text()}`);
-    results.findingSave="ok";
-    results.findingUpdate="ok";
-
-    const auditBefore=await pool.query("SELECT COALESCE(max(id),0)::bigint max_id FROM audit_logs WHERE organization_id=$1",[loginData.user.orgId]);
-    const pack=await fetch(base+"/api/reports/audit-pack.zip",{headers});
-    if(!pack.ok) throw new Error(`Smoke test audit pack failed: ${pack.status} ${await pack.text()}`);
-    const packType=pack.headers.get("content-type")||"";
-    const packBytes=Buffer.from(await pack.arrayBuffer());
-    if(!packType.includes("application/zip")||packBytes.length<1000) throw new Error("Smoke test audit pack returned an invalid archive");
-    results.auditPackZip="ok";
-    await pool.query("DELETE FROM audit_logs WHERE organization_id=$1 AND id>$2 AND action='EXPORT' AND details->>'format'='zip'",[loginData.user.orgId,auditBefore.rows[0].max_id]).catch(()=>{});
-
-    try{
-      const gh=await fetch("https://api.github.com/repos/kemnyame/Revolt-Enterprise-Control-Management",{headers:{"Accept":"application/vnd.github+json","User-Agent":"Revolt-X-Control-Smoke-Test"}});
-      results.githubConnectivity=gh.ok?"ok":"unavailable:"+gh.status;
-      if(!gh.ok) console.warn("GitHub connectivity smoke check unavailable",gh.status);
-    }catch(err:any){
-      results.githubConnectivity="unavailable";
-      console.warn("GitHub connectivity smoke check failed",err?.message||err);
-    }
-  } finally {
-    if(smokeFindingId){
-      await pool.query("DELETE FROM audit_logs WHERE entity_type='finding' AND entity_id=$1",[smokeFindingId]).catch(()=>{});
-      await pool.query("DELETE FROM findings WHERE id=$1",[smokeFindingId]).catch(()=>{});
-    }
-    if(smokeAssessmentId){
-      await pool.query("DELETE FROM audit_logs WHERE entity_type='assessment' AND entity_id=$1",[smokeAssessmentId]).catch(()=>{});
-      await pool.query("DELETE FROM audit_logs WHERE action='TEST_CONTROL' AND entity_type='control' AND entity_id=$1 AND details->>'assessmentId'=$2",[controlId,String(smokeAssessmentId)]).catch(()=>{});
-      await pool.query("DELETE FROM assessments WHERE id=$1",[smokeAssessmentId]);
-    }
-    if(smokeEvidenceId){
-      await pool.query("DELETE FROM audit_logs WHERE entity_type='evidence' AND entity_id=$1",[smokeEvidenceId]).catch(()=>{});
-      await pool.query("DELETE FROM audit_logs WHERE action='UPLOAD_EVIDENCE' AND entity_type='control' AND entity_id=$1 AND details->>'evidenceId'=$2",[controlId,String(smokeEvidenceId)]).catch(()=>{});
-      await pool.query("DELETE FROM evidence WHERE id=$1",[smokeEvidenceId]);
-    }
-    if(smokeFileId){
-      await pool.query("DELETE FROM audit_logs WHERE entity_type='evidence_file' AND entity_id=$1",[smokeFileId]).catch(()=>{});
-      await pool.query("DELETE FROM evidence_files WHERE id=$1",[smokeFileId]);
-    }
-    await pool.query("UPDATE controls SET last_tested=$2,next_due=$3 WHERE id=$1",[controlId,controlRow.rows[0].last_tested,controlRow.rows[0].next_due]);
-  }
-  console.log("Authenticated startup smoke test passed",JSON.stringify(results));
+export {app,pool,initDb};
+async function start(){await initDb();const server=app.listen(port,()=>console.log('Revolt-X IT Control Management running on port '+port));
+ const cycle=async()=>{try{await pool.query('SELECT ecm_prepare_notifications()');await dispatchSmtp(pool)}catch(e){console.error('Notification check failed',e instanceof Error?e.name:'Error')}};
+ const timer=setInterval(cycle,60000);timer.unref();process.on('SIGTERM',()=>{clearInterval(timer);server.close(()=>{pool.end().finally(()=>process.exit(0))})});
 }
-
-initDb().then(()=>{
-  const server=app.listen(port,async()=>{
-    console.log(`Revolt-X Enterprise Control Management running on port ${port}`);
-    try{
-      await runStartupSmokeTest();
-    }catch(err){
-      console.error("Authenticated startup smoke test failed",err);
-      server.close(()=>process.exit(1));
-    }
-  });
-}).catch(err=>{console.error("Startup failed",err);process.exit(1);});
+if(process.env.ECM_TEST_MODE!=='1')start().catch(e=>{console.error('Startup failed',e instanceof Error?e.message:'Error');process.exit(1)});
